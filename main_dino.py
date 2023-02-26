@@ -340,8 +340,8 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
         with torch.cuda.amp.autocast(fp16_scaler is not None):
             teacher_output = teacher(view1)  # only the 2 global views pass through the teacher
             student_output = student(view2)
-            print("teacher_output.size(): ", teacher_output.size())
-            print("student_output.size(): ", student_output.size())
+            # print("teacher_output.size(): ", teacher_output.size())
+            # print("student_output.size(): ", student_output.size())
             # loss = dino_loss(student_output, teacher_output, epoch)
             pre_mask = neck(student_output, teacher_output)
             # print(target.size())
@@ -349,7 +349,6 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             # print(loss)
             # test_show = pre_mask.reshape(pre_mask.size()[0], 64, 64).cpu().detach().numpy()*255
             # print(test_show)
-
 
         if not math.isfinite(loss.item()):
             print("Loss is {}, stopping training".format(loss.item()), force=True)

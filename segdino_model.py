@@ -65,23 +65,21 @@ class CrossAttention(nn.Module):
         self.proj = nn.Linear(dim, out_dim)
 
     def forward(self, x, t):
-        B, N = x.shape
+        B, N, C = x.shape
+        B, TN, TC = t.shape
+
         # qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         # q, k, v = qkv[0], qkv[1], qkv[2]
 
         q = self.q(t)
         k = self.k(x)
         v = self.v(x)
-        q = torch.unsqueeze(q,2)
-        k = torch.unsqueeze(k,2)
-        v = torch.unsqueeze(v,2)
         # print("k.size():", k.size())
         # print(k.transpose(-2,-1).size())
         attn = (q @ k.transpose(-2,-1)) * self.scale
-
         # print("attn.size():", attn.size())
         attn = attn.softmax(dim=-1)
-        x = (attn @ v).transpose(1, 2).reshape(B, N)
+        x = (attn @ v).transpose(1, 2).reshape(B, TN, TC)
         # x = self.proj(x).reshape(B, 64, 64)
         x = self.proj(x)
         # print("x.size():",x.size())
@@ -90,38 +88,49 @@ class CrossAttention(nn.Module):
 class Neck(nn.Module):
     def __init__(self): # 补上masking操作后输出到head
         super().__init__()
+        self.input_dim = 384
+        self.decoder_emd_dim = 512
+        self.out_dim = 256
 
-        self.mlp = nn.Linear(384,2048)
-        self.relu = nn.ReLU()
+        self.x_fc = nn.Linear(self.input_dim,self.decoder_emd_dim)
+        self.t_fc = nn.Linear(self.input_dim,self.decoder_emd_dim)
+        self.x_relu = nn.ReLU()
+        self.t_relu = nn.ReLU()
 
-        self.cross_attention = CrossAttention(dim=2048, out_dim=4096, num_heads=8, qkv_bias=False, qk_scale=None)
-        # self.upSampling =  nn.Upsample(scale_factor=(64), mode='nearest')#
+        self.cross_attention = CrossAttention(dim=self.decoder_emd_dim, out_dim=self.out_dim, num_heads=8, qkv_bias=False, qk_scale=None)
+        # BxLX256
         self.relu2 = nn.ReLU()
+        self.fc = nn.Linear(self.out_dim,1) # BxLX1
+        self.upSampling =  nn.Upsample(scale_factor=(4), mode='nearest')#
 
-        self.fc = nn.Linear(4096,4096)
         self._initialize_weights()
 
     def forward(self, x, t):
-        x = self.mlp(x)
-        t = self.mlp(t)
-        x = self.relu(x)
-        t = self.relu(t)
+        x = self.x_fc(x)
+        t = self.t_fc(t)
+        x = self.x_relu(x)
+        t = self.t_relu(t)
 
         # x = torch.unsqueeze(x,2)
         # t = torch.unsqueeze(t,2)
         # print(x,x.size())
         # print(t,t.size())
         x= self.cross_attention(x,t)
-        # print(x.size())
-
-        # x = torch.unsqueeze(x,1)
-        # print("upSampling(x).size():",x.size())
-        # x= self.upSampling(x)
-
-        # x = torch.squeeze(x,1)
         x = self.relu2(x)
         x = self.fc(x)
+        B, N, C = x.shape
 
+        # x = torch.unsqueeze(x,1)
+        # print("x.size():",x.size())
+        # x = torch.squeeze(x,2)
+        # print("x.size():",x.size())
+        x= self.upSampling(x.reshape(B, 32,32))
+        x =  x.reshape(B,-1)
+        # x = torch.squeeze(x,2)
+        # print("x.size():",x.size())
+
+
+        # print("upSampling(x).size():",x.size())
         # print("pre_x.size():",x.size())
         return x
 

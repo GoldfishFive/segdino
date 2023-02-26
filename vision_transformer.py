@@ -213,11 +213,11 @@ class VisionTransformer(nn.Module):
         x = self.norm(x)
 
         # print("x.size(): ",x.size())
-        return x[:, 0] # 只取第一patch維度的cls token [B,patchnum+1,C]=>[B,C]
+        # return x[:, 0] # 只取第一patch維度的cls token [B,patchnum+1,C]=>[B,C]
 
         # remove cls token
-        # x = x[:, 1:, :]
-        # return x
+        x = x[:, 1:, :]
+        return x
 
     def get_last_selfattention(self, x):
         x = self.prepare_tokens(x)
