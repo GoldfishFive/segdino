@@ -1,4 +1,5 @@
 import os
+from math import ceil, floor
 
 import numpy as np
 from torch.utils.data import Dataset
@@ -59,7 +60,7 @@ class DataAugmentationDINO(object):
         return crops
 
 class LoveDAdataset(Dataset):
-    def __init__(self, resizedcrop_view1 = None,resizedcrop_view2 = None,transform=None, datadir="/media/database/data4/wjy/datasets/Segmentation/loveda/Test/"):
+    def __init__(self, resizedcrop_view1 = None,resizedcrop_view2 = None,transform=None, datadir="/media/database/data4/wjy/datasets/Segmentation/loveda/Train/"):
         self.imglist = sorted(os.listdir(datadir))
         self.imglist = [os.path.join(datadir,i) for i in self.imglist]
         self.resizedcrop_view1 = resizedcrop_view1
@@ -86,6 +87,7 @@ class LoveDAdataset(Dataset):
             # img_x = F.resized_crop(img_x, i, j, h, w, self.resizedcrop_transform.size, self.resizedcrop_transform.interpolation)
             # equ to below
             img = F.crop(img_x, i, j, h, w)
+            W,H = img_mate['img_size'] = img.size # w1,h1
             mask = Image.new('L', img.size)
             # img.save('imagestest/croped_view1_before_transfom.png')
             # print(type(img),img.size)
@@ -98,8 +100,23 @@ class LoveDAdataset(Dataset):
             # print(type(img2),img2.size)
             mask2 = Image.new('L', img2.size, 1)
             # mask2.save('imagestest/mask2.png')
-            # mask.paste(mask2,(i2, j2, i2+h2, j2+w2))
-            mask.paste(mask2,(j2, i2, j2+w2,i2+h2 ))
+            S,T = img_mate['img2_size'] = img2.size # w2,h2
+            # img_mate['mask_size'] = mask.size # w2,h2
+            img_mate['crop_pos'] =  (i2, j2) # x2,y2
+            # print(S,T)
+            # S = S if S + i2 <=W else W-i2
+            # T = T if T + j2 <=H else H-j2
+            # print(S,T)
+            S_ = floor(S*32/W)
+            T_ = floor(T*32/H)
+            i_ = floor(i2*32/W)
+            j_ = floor(j2*32/H)
+            img_mate['crop32'] = (i_,j_,S_,T_) # X,Y,W,H of 32*32
+            # print(i_,j_,S_,T_)  # 不是很准确
+            # print(S_*T_)
+
+            mask.paste(mask2,(i2, j2, i2+w2, j2+h2))
+            # mask.paste(mask2,(j2, i2, j2+w2,i2+h2))
             # mask.save('imagestest/mask.png')
 
             # img2.save('imagestest/croped_view2_before_transfom.png')
@@ -109,10 +126,12 @@ class LoveDAdataset(Dataset):
             view1 = self.transform(img_x, "view1")  #first view for teacher
             view2 = self.transform(img_two, "view2")  #second view for student
             # mask = mask.resize((512, 512),Image.NEAREST)
-            mask = mask.resize((64, 64),Image.NEAREST)
-            mask = np.array(mask)
+            resized_mask = mask.resize((64, 64),Image.NEAREST)
+            resized_32_mask = mask.resize((32, 32),Image.NEAREST)
+            resized_mask = np.array(resized_mask)
+            resized_32_mask = np.array(resized_32_mask)
 
-        return view1, view2, mask, img_mate
+        return view1, view2, resized_mask, resized_32_mask, img_mate
 
     def __len__(self):
         return len(self.imglist)

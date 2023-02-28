@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from utils import trunc_normal_
 from vision_transformer  import Block
-
+from torch.nn.functional import upsample_nearest
 
 class SegDINO(nn.Module):
     """
@@ -85,6 +85,7 @@ class CrossAttention(nn.Module):
         # print("x.size():",x.size())
         return x
 
+
 class Neck(nn.Module):
     def __init__(self): # 补上masking操作后输出到head
         super().__init__()
@@ -101,15 +102,46 @@ class Neck(nn.Module):
         # BxLX256
         self.relu2 = nn.ReLU()
         self.fc = nn.Linear(self.out_dim,1) # BxLX1
-        self.upSampling =  nn.Upsample(scale_factor=(4), mode='nearest')#
+        # self.upSampling =  nn.Upsample(scale_factor=(4), mode='nearest')#
+        self.upSampling =  nn.Upsample(size=(64,64), mode='nearest')#
 
         self._initialize_weights()
+
+    def random_masking(self, x, mask_ratio):
+        """
+        Perform per-sample random masking by per-sample shuffling.
+        Per-sample shuffling is done by argsort random noise.
+        x: [N, L, D], sequence
+        """
+        N, L, D = x.shape  # batch, length, dim
+        len_keep = int(L * (1 - mask_ratio))
+
+        noise = torch.rand(N, L, device=x.device)  # noise in [0, 1]
+
+        # sort noise for each sample
+        ids_shuffle = torch.argsort(noise, dim=1)  # ascend: small is keep, large is remove
+        ids_restore = torch.argsort(ids_shuffle, dim=1)
+
+        # keep the first subset
+        ids_keep = ids_shuffle[:, :len_keep]
+        x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
+
+        # generate the binary mask: 0 is keep, 1 is remove
+        mask = torch.ones([N, L], device=x.device)
+        mask[:, :len_keep] = 0
+        # unshuffle to get the binary mask
+        mask = torch.gather(mask, dim=1, index=ids_restore)
+
+        return x_masked, mask, ids_restore
 
     def forward(self, x, t):
         x = self.x_fc(x)
         t = self.t_fc(t)
         x = self.x_relu(x)
         t = self.t_relu(t)
+
+        t, mask, ids_restore = self.random_masking(t,0.8)
+        # print(t.size())
 
         # x = torch.unsqueeze(x,2)
         # t = torch.unsqueeze(t,2)
@@ -118,13 +150,17 @@ class Neck(nn.Module):
         x= self.cross_attention(x,t)
         x = self.relu2(x)
         x = self.fc(x)
-        B, N, C = x.shape
+        B, N, C = x.shape # B,1024,1
 
         # x = torch.unsqueeze(x,1)
         # print("x.size():",x.size())
         # x = torch.squeeze(x,2)
         # print("x.size():",x.size())
-        x= self.upSampling(x.reshape(B, 32,32))
+        # x= self.upSampling(x.reshape(B, 32,32)) # B,1024,1
+        x= self.upSampling(x.reshape(B, 1, 17, 12)) # [2, 204, 1]=>B,1,17,12=>B,1,64,64
+        # x = nn.functional.interpolate(x.reshape(B, 1, 17, 12), size=[64, 64], mode="nearest")
+        # print("x.size():",x.size())
+
         x =  x.reshape(B,-1)
         # x = torch.squeeze(x,2)
         # print("x.size():",x.size())

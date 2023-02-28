@@ -32,7 +32,7 @@ import utils
 import vision_transformer as vits
 from segdino_model import DINOHead,SegDINO,Neck
 from LoveDA import LoveDAdataset,DataAugmentationDINO
-from segdino_loss import DINOLoss
+from segdino_loss import DINOLoss,init_msn_loss
 
 torchvision_archs = sorted(name for name in torchvision_models.__dict__
     if name.islower() and not name.startswith("__")
@@ -53,6 +53,8 @@ def get_args_parser():
         values leads to better performance but requires more memory. Applies only
         for ViTs (vit_tiny, vit_small and vit_base). If <16, we recommend disabling
         mixed precision training (--use_fp16 false) to avoid unstabilities.""")
+    # parser.add_argument('--out_dim', default=65536, type=int, help="""Dimensionality of
+    #     the DINO head output. For complex and large datasets large values (like 65k) work well.""")
     parser.add_argument('--out_dim', default=65536, type=int, help="""Dimensionality of
         the DINO head output. For complex and large datasets large values (like 65k) work well.""")
     parser.add_argument('--norm_last_layer', default=True, type=utils.bool_flag,
@@ -64,6 +66,8 @@ def get_args_parser():
         We recommend setting a higher value with small batches: for example use 0.9995 with batch size of 256.""")
     parser.add_argument('--use_bn_in_head', default=False, type=utils.bool_flag,
         help="Whether to use batch normalizations in projection head (Default: False)")
+    parser.add_argument('--num_proto', default=4096, type=int, help="""K learnable prototypes""")
+
 
     # Temperature teacher parameters
     parser.add_argument('--warmup_teacher_temp', default=0.04, type=float,
@@ -88,7 +92,7 @@ def get_args_parser():
     parser.add_argument('--clip_grad', type=float, default=3.0, help="""Maximal parameter
         gradient norm if using gradient clipping. Clipping with norm .3 ~ 1.0 can
         help optimization for larger ViT architectures. 0 for disabling.""")
-    parser.add_argument('--batch_size_per_gpu', default=2, type=int,
+    parser.add_argument('--batch_size_per_gpu', default=16, type=int,
         help='Per-GPU batch-size : number of distinct images loaded on one GPU.')
     parser.add_argument('--epochs', default=100, type=int, help='Number of epochs of training.')
     parser.add_argument('--freeze_last_layer', default=1, type=int, help="""Number of epochs
@@ -120,7 +124,7 @@ def get_args_parser():
     # Misc
     parser.add_argument('--data_path', default='/path/to/imagenet/train/', type=str,
         help='Please specify path to the ImageNet training data.')
-    parser.add_argument('--output_dir', default="./exps/0311/", type=str, help='Path to save logs and checkpoints.')
+    parser.add_argument('--output_dir', default="./exps/0312/", type=str, help='Path to save logs and checkpoints.')
     parser.add_argument('--saveckp_freq', default=20, type=int, help='Save checkpoint every x epochs.')
     parser.add_argument('--seed', default=0, type=int, help='Random seed.')
     parser.add_argument('--num_workers', default=1, type=int, help='Number of data loading workers per GPU.')
@@ -129,6 +133,31 @@ def get_args_parser():
     parser.add_argument("--local_rank", default=0, type=int, help="Please ignore and do not set this argument.")
     return parser
 
+### data
+label_smoothing = 0.0
+rand_views = 1
+# focal_views = 10
+focal_views = 1
+freeze_proto = False
+
+device = torch.device('cuda:0')
+
+### loss
+ent_weight= 0.0
+final_sharpen= 0.25
+me_max = True
+memax_weight= 0 # 1.0
+num_proto= 1024
+start_sharpen= 0.25
+temperature= 0.1
+use_ent= True
+use_sinkhorn= True
+
+def one_hot(targets, num_classes, smoothing=label_smoothing):
+    off_value = smoothing / num_classes
+    on_value = 1. - smoothing + off_value
+    targets = targets.long().view(-1, 1).cuda()
+    return torch.full((len(targets), num_classes), off_value, device=device).scatter_(1, targets, on_value)
 
 def train_dino(args):
     utils.init_distributed_mode(args)
@@ -224,6 +253,23 @@ def train_dino(args):
         p.requires_grad = False
     print(f"Student and Teacher are built: they are both {args.arch} network.")
 
+    # -- make prototypes
+    prototypes, proto_labels = None, None
+    output_dim = 384
+    if args.num_proto > 0:
+        with torch.no_grad():
+            prototypes = torch.empty(args.num_proto, output_dim)
+            _sqrt_k = (1./output_dim)**0.5
+            torch.nn.init.uniform_(prototypes, -_sqrt_k, _sqrt_k)
+            # prototypes = torch.nn.parameter.Parameter(prototypes).to(device)
+            prototypes = torch.nn.parameter.Parameter(prototypes).cuda()
+
+            # -- init prototype labels
+            proto_labels = one_hot(torch.tensor([i for i in range(args.num_proto)]), args.num_proto)
+
+        if not freeze_proto:
+            prototypes.requires_grad = True
+
     # ============ preparing loss ... ============
     dino_loss = DINOLoss(
         args.out_dim,
@@ -235,6 +281,12 @@ def train_dino(args):
     ).cuda()
     # celoss = nn.CrossEntropyLoss()
     celoss = nn.BCEWithLogitsLoss()
+    # -- init feature pre losses
+    msn = init_msn_loss(
+        num_views=focal_views + rand_views,
+        tau=temperature,
+        me_max=me_max,
+        return_preds=True)
 
     # ============ preparing optimizer ... ============
     params_groups = utils.get_params_groups(student)
@@ -287,7 +339,7 @@ def train_dino(args):
         # ============ training one epoch of DINO ... ============
         train_stats = train_one_epoch(student, teacher, teacher_without_ddp, dino_loss,
             data_loader, optimizer, lr_schedule, wd_schedule, momentum_schedule,
-            epoch, fp16_scaler, neck, celoss, args)
+            epoch, fp16_scaler, neck, celoss,msn,proto_labels,prototypes, args)
 
         # ============ writing logs ... ============
         save_dict = {
@@ -315,10 +367,10 @@ def train_dino(args):
 
 def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loader,
                     optimizer, lr_schedule, wd_schedule, momentum_schedule,epoch,
-                    fp16_scaler, neck, celoss, args):
+                    fp16_scaler, neck, celoss, msn,proto_labels,prototypes, args):
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
-    for it, (view1, view2, target, _) in enumerate(metric_logger.log_every(data_loader, 10, header)):
+    for it, (view1, view2, target, resized_32_mask, img_mate) in enumerate(metric_logger.log_every(data_loader, 10, header)):
         # update weight decay and learning rate according to their schedule
         it = len(data_loader) * epoch + it  # global training iteration
         for i, param_group in enumerate(optimizer.param_groups):
@@ -331,6 +383,18 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
         view2 = [im.cuda(non_blocking=True) for im in view2]
         # print(len(view1),view1)
         # print(numpy.unique(target[0]))
+        # print(img_mate)
+        # ids_retores = resized_32_mask
+        # print(ids_retores[0].sum())
+        # print(ids_retores[1].sum())
+        # ids_retores = ids_retores.bool().reshape(2,-1).unsqueeze(2).cuda()
+        # print(np.unique(ids_retores),ids_retores,ids_retores.size())
+        # print(ids_retores)
+        # ids_retores = torch.repeat_interleave(ids_retores, repeats=384, dim=2)
+        # print(ids_retores)
+        # print(ids_retores.sum())
+
+
         target = target.cuda()
         target = target.flatten(1)
         # print("target.size():",target.size())
@@ -345,10 +409,39 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             # loss = dino_loss(student_output, teacher_output, epoch)
             pre_mask = neck(student_output, teacher_output)
             # print(target.size())
-            loss = celoss(pre_mask, target.float())
+            BCEloss = celoss(pre_mask, target.float())
             # print(loss)
             # test_show = pre_mask.reshape(pre_mask.size()[0], 64, 64).cpu().detach().numpy()*255
             # print(test_show)
+
+            # Step 3. compute msn loss with me-max regularization
+            # print(teacher_output.size())
+            # print(ids_retores.size())
+            # teacher_output = torch.masked_select(teacher_output, ids_retores).reshape(2,196,-1)
+            teacher_output_resized = []
+            for i in range(teacher_output.size()[0]):
+                X = img_mate['crop32'][0][i]
+                Y = img_mate['crop32'][1][i]
+                W = img_mate['crop32'][2][i]
+                H = img_mate['crop32'][3][i]
+                # print(teacher_output[i].size())
+                tem = teacher_output[i].transpose(1,0).reshape(-1,32,32)[:,Y:Y+H,X:X+W].unsqueeze(0)
+                # print("tem.size()",tem.size())
+                tem = nn.functional.interpolate(tem, size=[14, 14], mode="bilinear")
+                teacher_output_resized.append(tem)
+            teacher_output_resized = torch.stack(teacher_output_resized,dim=0)
+
+            # print("teacher_output_resized.size():",teacher_output_resized.size())
+            teacher_output_resized = teacher_output_resized.reshape(args.batch_size_per_gpu,1,384,-1).squeeze(1).transpose(2,1)
+            (ploss, me_max, ent, logs, _) = msn(
+                use_sinkhorn=use_sinkhorn,
+                use_entropy=use_ent,
+                anchor_views=student_output,
+                target_views=teacher_output_resized,
+                proto_labels=proto_labels,
+                prototypes=prototypes)
+
+            loss = ploss + memax_weight * me_max + ent_weight * ent + BCEloss
 
         if not math.isfinite(loss.item()):
             print("Loss is {}, stopping training".format(loss.item()), force=True)
@@ -383,14 +476,13 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
         # logging
         torch.cuda.synchronize()
         metric_logger.update(loss=loss.item())
+        metric_logger.update(BCEloss = BCEloss.item(),ploss=ploss.item() ,me_max=me_max.item(), ent=ent.item())
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(wd=optimizer.param_groups[0]["weight_decay"])
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
-
-
 
 
 # class DataAugmentationDINO(object):
