@@ -60,11 +60,11 @@ class DataAugmentationDINO(object):
         return crops
 
 class LoveDAdataset(Dataset):
-    def __init__(self, resizedcrop_view1 = None,resizedcrop_view2 = None,transform=None, datadir="/media/database/data4/wjy/datasets/Segmentation/loveda/Train/"):
+    def __init__(self, target_view = None,anchor_view = None,transform=None, datadir="/media/database/data4/wjy/datasets/Segmentation/loveda/Train/"):
         self.imglist = sorted(os.listdir(datadir))
         self.imglist = [os.path.join(datadir,i) for i in self.imglist]
-        self.resizedcrop_view1 = resizedcrop_view1
-        self.resizedcrop_view2 = resizedcrop_view2
+        self.target_view = target_view
+        self.anchor_view = anchor_view
         self.transform = transform
 
 
@@ -81,7 +81,7 @@ class LoveDAdataset(Dataset):
             # img_x.save("imagestest/origin_1024_1024.png")
 
             #  resized_crop
-            i, j, h, w = self.resizedcrop_view1.get_params(img_x, self.resizedcrop_view1.scale, self.resizedcrop_view1.ratio)
+            i, j, h, w = self.target_view.get_params(img_x, self.target_view.scale, self.target_view.ratio)
             # print(i,j,h,w)
 
             # img_x = F.resized_crop(img_x, i, j, h, w, self.resizedcrop_transform.size, self.resizedcrop_transform.interpolation)
@@ -91,10 +91,10 @@ class LoveDAdataset(Dataset):
             mask = Image.new('L', img.size)
             # img.save('imagestest/croped_view1_before_transfom.png')
             # print(type(img),img.size)
-            img_x = F.resize(img, self.resizedcrop_view1.size,self.resizedcrop_view1.interpolation)
+            img_x = F.resize(img, self.target_view.size,self.target_view.interpolation)
 
             # second view is croped from first view for student
-            i2, j2, h2, w2 = self.resizedcrop_view2.get_params(img, self.resizedcrop_view2.scale, self.resizedcrop_view2.ratio)
+            i2, j2, h2, w2 = self.anchor_view.get_params(img, self.anchor_view.scale, self.anchor_view.ratio)
             img2 = F.crop(img, i2, j2, h2, w2)
             # print(i2, j2, h2, w2)
             # print(type(img2),img2.size)
@@ -121,7 +121,7 @@ class LoveDAdataset(Dataset):
 
             # img2.save('imagestest/croped_view2_before_transfom.png')
 
-            img_two = F.resize(img2, self.resizedcrop_view2.size,self.resizedcrop_view2.interpolation)
+            img_two = F.resize(img2, self.anchor_view.size,self.anchor_view.interpolation)
 
             view1 = self.transform(img_x, "view1")  #first view for teacher
             view2 = self.transform(img_two, "view2")  #second view for student
@@ -140,10 +140,10 @@ class LoveDAdataset(Dataset):
 if __name__ == "__main__":
 
     transform = DataAugmentationDINO()
-    resizedcrop_view1 = transforms.RandomResizedCrop(size=(512,512),scale=(0.45, 0.75))
-    resizedcrop_view2 = transforms.RandomResizedCrop(size=(224,224),scale=(0.25, 0.45))
+    target_view = transforms.RandomResizedCrop(size=(512,512),scale=(0.45, 0.75))
+    anchor_view = transforms.RandomResizedCrop(size=(224,224),scale=(0.25, 0.45))
 
-    love = LoveDAdataset(resizedcrop_view1 = resizedcrop_view1,resizedcrop_view2 = resizedcrop_view2,transform=transform)
+    love = LoveDAdataset(target_view = target_view,anchor_view = anchor_view,transform=transform)
 
     print(love[1][0][0].size())
     print(love[1][1][0].size())

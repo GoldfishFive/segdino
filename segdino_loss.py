@@ -21,33 +21,60 @@ class AllReduce(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grads):
         return grads
+class AllReduceSum(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, x):
+        if (
+            dist.is_available()
+            and dist.is_initialized()
+            and (dist.get_world_size() > 1)
+        ):
+            x = x.contiguous()
+            dist.all_reduce(x)
+        return x
+
+    @staticmethod
+    def backward(ctx, grads):
+        return grads
+
 
 def init_msn_loss(num_views=1, tau=0.1, me_max=True, return_preds=False):
     """
-    Make unsupervised MSN loss
+    Make unsupervised patch-based MSN loss
 
     :num_views: number of anchor views
     :param tau: cosine similarity temperature
     :param me_max: whether to perform me-max regularization
     :param return_preds: whether to return anchor predictions
     """
-    softmax = torch.nn.Softmax(dim=1)
+    # softmax = torch.nn.Softmax(dim=1)
+    softmax = torch.nn.Softmax(dim=2)
 
     def sharpen(p, T):
         sharp_p = p**(1./T)
-        sharp_p /= torch.sum(sharp_p, dim=1, keepdim=True)
+        sharp_p_sum = torch.sum(sharp_p, dim=1, keepdim=True)
+        sharp_p /= sharp_p_sum
         return sharp_p
 
     def snn(query, supports, support_labels, temp=tau):
         """ Soft Nearest Neighbours similarity classifier """
-        query = torch.nn.functional.normalize(query)
-        supports = torch.nn.functional.normalize(supports)
-        return softmax(query @ supports.T / temp) @ support_labels
+        query = torch.nn.functional.normalize(query) # 默认的计算是2范数
+        supports = torch.nn.functional.normalize(supports) # 默认的计算是2范数
+        tem = query @ supports.T / temp
+        softmax_tem = softmax(tem)
+        re = softmax_tem @ support_labels
+        # sumtem = softmax_tem.sum(dim=1)
+        sumtem = softmax_tem.sum(dim=2)
+        return re
 
-    def loss(anchor_views,target_views,prototypes,proto_labels,T=0.25,use_entropy=False,use_sinkhorn=False,sharpen=sharpen,snn=snn
-    ):
+    def loss(anchor_views, target_views, prototypes, proto_labels, T=0.25,
+             use_entropy=False, use_sinkhorn=False, sharpen=sharpen, snn=snn):
+
         # Step 1: compute anchor predictions
         probs = snn(anchor_views, prototypes, proto_labels)
+        probssumdim1 = probs.sum(dim=1)
+        probssumdim2 = probs.sum(dim=2)
 
         # Step 2: compute targets for anchor predictions
         with torch.no_grad():
@@ -61,26 +88,45 @@ def init_msn_loss(num_views=1, tau=0.1, me_max=True, return_preds=False):
         # print(probs.size(),targets.size())
 
         # Step 3: compute cross-entropy loss H(targets, queries)
-        loss = torch.mean(torch.sum(torch.log(probs**(-targets)), dim=1))
+        probs_log = torch.log(probs**(-targets))
+        # probs_sum = torch.sum(probs_log, dim=1)
+        probs_sum = torch.sum(probs_log, dim=2)
+        loss = torch.mean(probs_sum)
 
         # Step 4: compute me-max regularizer
         rloss = 0.
         if me_max:
-            avg_probs = AllReduce.apply(torch.mean(probs, dim=0))
-            rloss = - torch.sum(torch.log(avg_probs**(-avg_probs))) + math.log(float(len(avg_probs)))
+            probs_mean = torch.mean(probs, dim=0)
+            probs_mean2 = torch.mean(probs_mean, dim=0)
+            avg_probs = AllReduce.apply(probs_mean2)
+
+            avg_probs_log = torch.log(avg_probs**(-avg_probs))
+            avg_probs_len = len(avg_probs)
+
+            avg_probs_len_log= math.log(float(avg_probs_len))
+            avg_probs_log_sum = - torch.sum(avg_probs_log)
+
+            rloss = avg_probs_log_sum + avg_probs_len_log
 
         sloss = 0.
         if use_entropy:
-            sloss = torch.mean(torch.sum(torch.log(probs**(-probs)), dim=1))
+            pp_log = torch.log(probs**(-probs))
+            pp_log_sum = torch.sum(pp_log, dim = 2)
+            sloss = torch.mean(pp_log_sum)
 
         # print(targets.size())
         # -- loggings
         with torch.no_grad():
+            targets_argmax = targets.argmax(dim=1)
+
             # num_ps = float(len(set(targets.argmax(dim=1).tolist())))
             num_ps = None
             max_t = targets.max(dim=1).values.mean()
             min_t = targets.min(dim=1).values.mean()
             log_dct = {'np': num_ps, 'max_t': max_t, 'min_t': min_t}
+
+            targets_max_mean = targets.max(dim=1).values
+            targets_min_mean = targets.min(dim=1).values
 
         if return_preds:
             return loss, rloss, sloss, log_dct, targets

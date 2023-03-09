@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from utils import trunc_normal_
-from vision_transformer  import Block
+from vision_transformer  import Block, Mlp
 from torch.nn.functional import upsample_nearest
 
 class SegDINO(nn.Module):
@@ -56,7 +56,7 @@ class CrossAttention(nn.Module):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
-        self.scale = qk_scale or head_dim ** -0.5
+        self.scale = qk_scale or head_dim ** -0.5 # self.scale=0.125
 
         self.q = nn.Linear(dim, dim, bias=qkv_bias)
         self.k = nn.Linear(dim, dim, bias=qkv_bias)
@@ -68,14 +68,12 @@ class CrossAttention(nn.Module):
         B, N, C = x.shape
         B, TN, TC = t.shape
 
-        # qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        # q, k, v = qkv[0], qkv[1], qkv[2]
-
+        #  using target as query
         q = self.q(t)
         k = self.k(x)
         v = self.v(x)
         # print("k.size():", k.size())
-        # print(k.transpose(-2,-1).size())
+        # print("q.size():", q.size())
         attn = (q @ k.transpose(-2,-1)) * self.scale
         # print("attn.size():", attn.size())
         attn = attn.softmax(dim=-1)
@@ -83,27 +81,50 @@ class CrossAttention(nn.Module):
         # x = self.proj(x).reshape(B, 64, 64)
         x = self.proj(x)
         # print("x.size():",x.size())
+
+        #  using anchor as query
+        # q = self.q(x)
+        # k = self.k(t)
+        # v = self.v(t)
+        # # print("k.size():", k.size()) #[B, 204, 512]
+        # # print("q.size():", q.size())  #[B, 196, 512]
+        # # print(k.transpose(-2,-1).size())
+        # attn = (q @ k.transpose(-2,-1)) * self.scale
+        # # print("attn.size():", attn.size()) #[B, 196, 204]
+        # attn = attn.softmax(dim=-1)
+        # x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        # x = self.proj(x)
         return x
 
 
 class Neck(nn.Module):
-    def __init__(self): # 补上masking操作后输出到head
+    def __init__(self,input_dim=384, decoder_emd_dim=512, cross_atte_out_dim=256, mask_ratio=0.8):
         super().__init__()
-        self.input_dim = 384
-        self.decoder_emd_dim = 512
-        self.out_dim = 256
+        self.input_dim = input_dim
+        self.decoder_emd_dim = decoder_emd_dim
+        self.cross_atte_out_dim = cross_atte_out_dim
+        self.mask_ratio = mask_ratio
 
-        self.x_fc = nn.Linear(self.input_dim,self.decoder_emd_dim)
-        self.t_fc = nn.Linear(self.input_dim,self.decoder_emd_dim)
+        self.x_fc = nn.Linear(self.input_dim, self.decoder_emd_dim)
+        self.t_fc = nn.Linear(self.input_dim, self.decoder_emd_dim)
+        self.norm_x = nn.LayerNorm(self.decoder_emd_dim)
+        self.norm_t = nn.LayerNorm(self.decoder_emd_dim)
         self.x_relu = nn.ReLU()
         self.t_relu = nn.ReLU()
 
-        self.cross_attention = CrossAttention(dim=self.decoder_emd_dim, out_dim=self.out_dim, num_heads=8, qkv_bias=False, qk_scale=None)
-        # BxLX256
-        self.relu2 = nn.ReLU()
-        self.fc = nn.Linear(self.out_dim,1) # BxLX1
+        self.cross_attention = CrossAttention(dim=self.decoder_emd_dim, out_dim=self.cross_atte_out_dim,
+                                              num_heads=8, qkv_bias=False, qk_scale=None)# B x L*(1-mask_ratio) x 256
+
+        self.norm_cross = nn.LayerNorm(self.cross_atte_out_dim)
+        self.relu_cross = nn.ReLU()
+
+        self.fc_head = nn.Linear(self.cross_atte_out_dim,1) # # B x L*(1-mask_ratio) X 1
         # self.upSampling =  nn.Upsample(scale_factor=(4), mode='nearest')#
-        self.upSampling =  nn.Upsample(size=(64,64), mode='nearest')#
+        self.upSampling =  nn.Upsample(size=(64, 64), mode='nearest')# predict a Bx64x64 result
+
+        # for patch-based feature loss
+        self.mlp_x = Mlp(in_features=self.input_dim, hidden_features=self.decoder_emd_dim, act_layer=nn.GELU, drop=0.)
+        self.mlp_t = Mlp(in_features=self.input_dim, hidden_features=self.decoder_emd_dim, act_layer=nn.GELU, drop=0.)
 
         self._initialize_weights()
 
@@ -135,40 +156,42 @@ class Neck(nn.Module):
         return x_masked, mask, ids_restore
 
     def forward(self, x, t):
+        x_ = self.mlp_x(x)
+        t_ = self.mlp_t(t)
+        # print("x_.size():", x_.size())
+        # print("t_.size():", t_.size())
+
         x = self.x_fc(x)
         t = self.t_fc(t)
+        x = self.norm_x(x)
+        t = self.norm_t(t)
         x = self.x_relu(x)
         t = self.t_relu(t)
 
-        t, mask, ids_restore = self.random_masking(t,0.8)
-        # print(t.size())
-
-        # x = torch.unsqueeze(x,2)
-        # t = torch.unsqueeze(t,2)
+        t, mask, ids_restore = self.random_masking(t, self.mask_ratio)
         # print(x,x.size())
         # print(t,t.size())
-        x= self.cross_attention(x,t)
-        x = self.relu2(x)
-        x = self.fc(x)
-        B, N, C = x.shape # B,1024,1
+        x = self.cross_attention(x, t)
+        x = self.norm_cross(x)
+        x = self.relu_cross(x)
+        x = self.fc_head(x)
 
-        # x = torch.unsqueeze(x,1)
-        # print("x.size():",x.size())
-        # x = torch.squeeze(x,2)
-        # print("x.size():",x.size())
-        # x= self.upSampling(x.reshape(B, 32,32)) # B,1024,1
-        x= self.upSampling(x.reshape(B, 1, 17, 12)) # [2, 204, 1]=>B,1,17,12=>B,1,64,64
+        # #when using masked_target as query
+        B, N, C = x.shape # when using masking and mask_ratio=0.8 ## B,1024*0.2,1 = B,204,1
+        x= self.upSampling(x.reshape(B, 1, 17, 12)) # [B, 204, 1]=>B,1,17,12=>B,1,64,64 掩模的比例不同，剩下的特征数不一样，需要reshape后才能上采样输出特征图
         # x = nn.functional.interpolate(x.reshape(B, 1, 17, 12), size=[64, 64], mode="nearest")
         # print("x.size():",x.size())
-
-        x =  x.reshape(B,-1)
-        # x = torch.squeeze(x,2)
+        x =  x.reshape(B, -1)
         # print("x.size():",x.size())
 
 
-        # print("upSampling(x).size():",x.size())
-        # print("pre_x.size():",x.size())
-        return x
+
+        # B, N, C = x.shape # when using anchor as query and using masking with mask_ratio=0.8 ## B,196,1
+        # x= self.upSampling(x.reshape(B, 1, 14, 14)) # [B, 204, 1]=>B,1,14,14=>B,1,64,64
+        # x =  x.reshape(B, -1)
+        # #print("x.size():",x.size())
+
+        return x, x_, t_
 
     def _initialize_weights(self):
         for m in self.modules():
@@ -176,14 +199,7 @@ class Neck(nn.Module):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out')
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.Conv3d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out')
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
             elif isinstance(m, nn.BatchNorm2d):
-                nn.init.ones_(m.weight)
-                nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.BatchNorm3d):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
             elif isinstance(m, nn.Linear):
