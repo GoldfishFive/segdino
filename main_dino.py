@@ -35,50 +35,43 @@ from LoveDA import LoveDAdataset, DataAugmentationDINO
 from segdino_loss import DINOLoss, init_msn_loss, AllReduceSum
 
 torchvision_archs = sorted(name for name in torchvision_models.__dict__
-    if name.islower() and not name.startswith("__")
-    and callable(torchvision_models.__dict__[name]))
+                           if name.islower() and not name.startswith("__")
+                           and callable(torchvision_models.__dict__[name]))
 
 
 def get_args_parser():
-    parser = argparse.ArgumentParser('DINO', add_help=False)
+    parser = argparse.ArgumentParser('SegDINO', add_help=False)
 
     # Model parameters
     parser.add_argument('--arch', default='vit_small', type=str,
-        choices=['vit_tiny', 'vit_small', 'vit_base', 'xcit', 'deit_tiny', 'deit_small'] \
-                + torchvision_archs + torch.hub.list("facebookresearch/xcit:main"),
-        help="""Name of architecture to train. For quick experiments with ViTs,
+                        choices=['vit_tiny', 'vit_small', 'vit_base', 'xcit', 'deit_tiny', 'deit_small'] \
+                                + torchvision_archs + torch.hub.list("facebookresearch/xcit:main"),
+                        help="""Name of architecture to train. For quick experiments with ViTs,
         we recommend using vit_tiny or vit_small.""")
     parser.add_argument('--patch_size', default=16, type=int, help="""Size in pixels
         of input square patches - default 16 (for 16x16 patches). Using smaller
         values leads to better performance but requires more memory. Applies only
         for ViTs (vit_tiny, vit_small and vit_base). If <16, we recommend disabling
         mixed precision training (--use_fp16 false) to avoid unstabilities.""")
-
-    # parser.add_argument('--out_dim', default=65536, type=int, help="""Dimensionality of
-    #     the DINO head output. For complex and large datasets large values (like 65k) work well.""")
-    parser.add_argument('--out_dim', default=65536, type=int, help="""Dimensionality of
-        the DINO head output. For complex and large datasets large values (like 65k) work well.""")
     parser.add_argument('--norm_last_layer', default=True, type=utils.bool_flag,
-        help="""Whether or not to weight normalize the last layer of the DINO head.
+                        help="""Whether or not to weight normalize the last layer of the DINO head.
         Not normalizing leads to better performance but can make the training unstable.
         In our experiments, we typically set this paramater to False with vit_small and True with vit_base.""")
     parser.add_argument('--momentum_teacher', default=0.9995, type=float, help="""Base EMA
         parameter for teacher update. The value is increased to 1 during training with cosine schedule.
         We recommend setting a higher value with small batches: for example use 0.9995 with batch size of 256.""")
     parser.add_argument('--use_bn_in_head', default=False, type=utils.bool_flag,
-        help="Whether to use batch normalizations in projection head (Default: False)")
-
-
+                        help="Whether to use batch normalizations in projection head (Default: False)")
 
     # Temperature teacher parameters
     parser.add_argument('--warmup_teacher_temp', default=0.04, type=float,
-        help="""Initial value for the teacher temperature: 0.04 works well in most cases.
+                        help="""Initial value for the teacher temperature: 0.04 works well in most cases.
         Try decreasing it if the training loss does not decrease.""")
     parser.add_argument('--teacher_temp', default=0.04, type=float, help="""Final value (after linear warmup)
         of the teacher temperature. For most experiments, anything above 0.07 is unstable. We recommend
         starting with the default value of 0.04 and increase this slightly if needed.""")
     parser.add_argument('--warmup_teacher_temp_epochs', default=0, type=int,
-        help='Number of warmup epochs for the teacher temperature (Default: 30).')
+                        help='Number of warmup epochs for the teacher temperature (Default: 30).')
 
     # Training/Optimization parameters
     parser.add_argument('--use_fp16', type=utils.bool_flag, default=False, help="""Whether or not
@@ -94,73 +87,71 @@ def get_args_parser():
         gradient norm if using gradient clipping. Clipping with norm .3 ~ 1.0 can
         help optimization for larger ViT architectures. 0 for disabling.""")
     parser.add_argument('--batch_size_per_gpu', default=48, type=int,
-        help='48  Per-GPU batch-size : number of distinct images loaded on one GPU.')
+                        help='48  Per-GPU batch-size : number of distinct images loaded on one GPU.')
     parser.add_argument('--epochs', default=600, type=int, help='Number of epochs of training.')
     parser.add_argument('--freeze_last_layer', default=1, type=int, help="""Number of epochs
         during which we keep the output layer fixed. Typically doing so during
         the first epoch helps training. Try increasing this value if the loss does not decrease.""")
-    parser.add_argument("--lr", default=0.0005, type=float, help="""0.0005 Learning rate at the end of
+    parser.add_argument("--lr", default=0.0006, type=float, help="""0.0005 Learning rate at the end of
         linear warmup (highest LR used during training). The learning rate is linearly scaled
         with the batch size, and specified here for a reference batch size of 256.""")
-    parser.add_argument("--warmup_epochs", default=1, type=int,
-        help="Number of epochs for the linear learning-rate warm up.")
-    parser.add_argument('--min_lr', type=float, default=1e-6, help="""Target LR at the
+    parser.add_argument("--warmup_epochs", default=10, type=int,
+                        help="Number of epochs for the linear learning-rate warm up.")
+    parser.add_argument('--min_lr', type=float, default=1e-8, help="""Target LR at the
         end of optimization. We use a cosine LR schedule with linear warmup.""")
     parser.add_argument('--optimizer', default='adamw', type=str,
-        choices=['adamw', 'sgd', 'lars'], help="""Type of optimizer. We recommend using adamw with ViTs.""")
-    parser.add_argument('--drop_path_rate', type=float, default=0.1, help="stochastic depth rate")
+                        choices=['adamw', 'sgd', 'lars'],
+                        help="""Type of optimizer. We recommend using adamw with ViTs.""")
+    parser.add_argument('--drop_path_rate', type=float, default=0.0, help="default=0.1,stochastic depth rate")
 
     # Multi-crop parameters
-    parser.add_argument('--global_crops_scale', type=float, nargs='+', default=(0.4, 1.),
-        help="""Scale range of the cropped image before resizing, relatively to the origin image.
-        Used for large global view cropping. When disabling multi-crop (--local_crops_number 0), we
-        recommand using a wider range of scale ("--global_crops_scale 0.14 1." for example)""")
-    parser.add_argument('--local_crops_number', type=int, default=8, help="""Number of small
-        local views to generate. Set this parameter to 0 to disable multi-crop training.
-        When disabling multi-crop we recommend to use "--global_crops_scale 0.14 1." """)
     parser.add_argument('--local_crops_scale', type=float, nargs='+', default=(0.05, 0.4),
-        help="""Scale range of the cropped image before resizing, relatively to the origin image.
+                        help="""Scale range of the cropped image before resizing, relatively to the origin image.
         Used for small local view cropping of multi-crop.""")
 
     parser.add_argument('--num_proto', default=64, type=int, help="""K learnable prototypes""")
     parser.add_argument('--freeze_proto', default=False, type=bool, help="""whether to freeze prototypes or not""")
 
     """ target==>global;anchor==>local"""
-    parser.add_argument('--target_view_crops_scale', type=float, nargs='+', default=(0.45, 0.75))
-    parser.add_argument('--target_view_crops_size', type=int, nargs='+', default=(512, 512))
+    parser.add_argument('--target_view_crops_scale', type=float, nargs='+', default=(0.25, 0.45))
+    parser.add_argument('--target_view_crops_size', type=int, nargs='+', default=(224, 224))
     parser.add_argument('--anchor_view_crops_scale', type=float, nargs='+', default=(0.25, 0.45))
-    parser.add_argument('--anchor_view_crops_size', type=float, nargs='+', default=(224, 224))
+    parser.add_argument('--anchor_view_crops_size', type=float, nargs='+', default=(96, 96))
     parser.add_argument('--focal_views_number', type=int, default=1, help="""Number of focal_views to generate. """)
-    parser.add_argument('--rand_views_number', type=int, default=1, help="""Number of rand_views to generate. """)
+    parser.add_argument('--local_crops_number', type=int, default=1, help="""Number of small
+        local views to generate. Set this parameter to 0 to disable multi-crop training.
+        When disabling multi-crop we recommend to use "--global_crops_scale 0.14 1." """)
 
-    parser.add_argument('--mask_ratio', type=float, default=0.8, help="mask rate of target features")
+    parser.add_argument('--mask_ratio', type=float, default=0.75, help="mask rate of target features")
 
     ## loss
     parser.add_argument('--label_smoothing', default=0.0, type=float, help="label_smoothing for prototypes")
     parser.add_argument('--loss_temperature', default=0.1, type=float, help="cosine similarity temperature")
     parser.add_argument('--use_sinkhorn', default=True, type=bool, help="sinkhorn to find the bast matching")
     parser.add_argument('--use_ent', default=True, type=bool, help="sinkhorn to find the bast matching")
-    parser.add_argument('--ent_weight', default=0.0, type=float, help="cosine similarity temperature")
+    parser.add_argument('--ent_weight', default=0.1, type=float, help="cosine similarity temperature")
     parser.add_argument('--me_max', default=True, type=bool, help="sinkhorn to find the bast matching")
-    parser.add_argument('--memax_weight', default=1.0, type=float, help="default= 1.0;cosine similarity temperature")
+    parser.add_argument('--memax_weight', default=0.1, type=float, help="default= 1.0;cosine similarity temperature")
 
     # Misc
-    parser.add_argument('--data_path', default='/media/database/data4/wjy/datasets/Segmentation/loveda/Train/', type=str,
-        help='Please specify path to the ImageNet training data.')
-    parser.add_argument('--output_dir', default="./exps/0316_3/", type=str, help='Path to save logs and checkpoints.')
-    parser.add_argument('--saveckp_freq', default=20, type=int, help='Save checkpoint every x epochs.')
+    parser.add_argument('--data_path', default='/media/data1/wjy/dataset/loveda/Train/',
+                        type=str,help='Please specify path to the ImageNet training data.')
+    parser.add_argument('--output_dir', default="./exps/0323/", type=str, help='Path to save logs and checkpoints.')
+    parser.add_argument('--saveckp_freq', default=50, type=int, help='Save checkpoint every x epochs.')
     parser.add_argument('--seed', default=0, type=int, help='Random seed.')
-    parser.add_argument('--num_workers', default=16, type=int, help='Number of data loading workers per GPU.')
+    parser.add_argument('--num_workers', default=10, type=int, help='Number of data loading workers per GPU.')
     parser.add_argument("--dist_url", default="env://", type=str, help="""url used to set up
         distributed training; see https://pytorch.org/docs/stable/distributed.html""")
     parser.add_argument("--local_rank", default=0, type=int, help="Please ignore and do not set this argument.")
     return parser
+
+
 def create_logger(arg):
     # set up logger dir
     time_str = time.strftime('%Y-%m-%d-%H-%M')
     log_file = '{}.log'.format(time_str)
 
-    final_log_file =  os.path.join(arg.output_dir,log_file)
+    final_log_file = os.path.join(arg.output_dir, log_file)
 
     head = '%(asctime)-15s %(message)s'
     logging.basicConfig(filename=str(final_log_file), filemode="a",
@@ -172,11 +163,13 @@ def create_logger(arg):
 
     return logger
 
+
 def one_hot(targets, num_classes, smoothing=0.0):
     off_value = smoothing / num_classes
     on_value = 1. - smoothing + off_value
     targets = targets.long().view(-1, 1).cuda()
     return torch.full((len(targets), num_classes), off_value, device='cuda').scatter_(1, targets, on_value)
+
 
 def train_dino(args):
     logger = create_logger(args)
@@ -192,8 +185,8 @@ def train_dino(args):
     transform = DataAugmentationDINO()
     target_view = transforms.RandomResizedCrop(size=args.target_view_crops_size, scale=args.target_view_crops_scale)
     anchor_view = transforms.RandomResizedCrop(size=args.anchor_view_crops_size, scale=args.anchor_view_crops_scale)
-    dataset = LoveDAdataset(target_view = target_view, anchor_view = anchor_view, transform=transform,
-                            datadir=args.data_path)
+    dataset = LoveDAdataset(target_view=target_view, anchor_view=anchor_view, transform=transform,
+                            datadir=args.data_path, args=args)
 
     sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
 
@@ -208,7 +201,7 @@ def train_dino(args):
     logger.info(f"Data loaded: there are {len(dataset)} images.")
 
     # ============ building student and teacher networks ... ============
-    output_dim = 384 # default for ViT-S
+    output_dim = 384  # default for ViT-S
     # we changed the name DeiT-S for ViT-S to avoid confusions
     args.arch = args.arch.replace("deit", "vit")
     # if the network is a Vision Transformer (i.e. vit_tiny, vit_small, vit_base)
@@ -218,47 +211,49 @@ def train_dino(args):
             drop_path_rate=args.drop_path_rate,  # stochastic depth
         )
         teacher = vits.__dict__[args.arch](patch_size=args.patch_size)
-        output_dim = student.embed_dim # output_dim from model
+        output_dim = student.embed_dim  # output_dim from model
     else:
         logger.error(f"Unknow architecture: {args.arch}")
 
-
-    # multi-crop wrapper handles forward with inputs of different resolutions
-    student = SegDINO(student)
-    teacher = SegDINO(teacher)
-    neck = Neck(input_dim=output_dim, decoder_emd_dim=512, cross_atte_out_dim=256, mask_ratio=args.mask_ratio)
+    neck = Neck(input_dim=output_dim, decoder_emd_dim=256, cross_atte_out_dim=128, mask_ratio=args.mask_ratio)
 
     # move networks to gpu
-    student, teacher, neck= student.cuda(), teacher.cuda(), neck.cuda()
+    student, teacher, neck = student.cuda(), teacher.cuda(), neck.cuda()
     # synchronize batch norms (if any)
-    if utils.has_batchnorms(student):
-        student = nn.SyncBatchNorm.convert_sync_batchnorm(student)
-        teacher = nn.SyncBatchNorm.convert_sync_batchnorm(teacher)
+    # if utils.has_batchnorms(student):
+    #     student = nn.SyncBatchNorm.convert_sync_batchnorm(student)
+    #     teacher = nn.SyncBatchNorm.convert_sync_batchnorm(teacher)
+    #
+    #     # we need DDP wrapper to have synchro batch norms working...
+    #     teacher = nn.parallel.DistributedDataParallel(teacher, device_ids=[args.gpu])
+    #     teacher_without_ddp = teacher.module
+    # else:
+    #     # teacher_without_ddp and teacher are the same thing
+    #     teacher_without_ddp = teacher
 
-        # we need DDP wrapper to have synchro batch norms working...
-        teacher = nn.parallel.DistributedDataParallel(teacher, device_ids=[args.gpu])
-        teacher_without_ddp = teacher.module
-    else:
-        # teacher_without_ddp and teacher are the same thing
-        teacher_without_ddp = teacher
+    teacher = nn.parallel.DistributedDataParallel(teacher, device_ids=[args.gpu])
     student = nn.parallel.DistributedDataParallel(student, device_ids=[args.gpu])
     # teacher and student start with the same weights
-    teacher_without_ddp.load_state_dict(student.module.state_dict())
+    teacher.load_state_dict(student.state_dict())# teacher_without_ddp.load_state_dict(student.module.state_dict())
     # there is no backpropagation through the teacher, so no need for gradients
     for p in teacher.parameters():
         p.requires_grad = False
     logger.info(f"Student and Teacher are built: they are both {args.arch} network.")
+
+    # multi-crop wrapper handles forward with inputs of different resolutions
+    segdino = SegDINO(student, teacher, neck)
 
     # -- make prototypes
     prototypes, proto_labels = None, None
     if args.num_proto > 0:
         with torch.no_grad():
             prototypes = torch.empty(args.num_proto, output_dim)
-            _sqrt_k = (1./output_dim)**0.5
+            _sqrt_k = (1. / output_dim) ** 0.5
             torch.nn.init.uniform_(prototypes, -_sqrt_k, _sqrt_k)  # 从均匀分布U(a,b)中生成值，填充输入的张量或变量。
             prototypes = torch.nn.parameter.Parameter(prototypes).cuda()
             # -- init prototype labels
-            proto_labels = one_hot(torch.tensor([i for i in range(args.num_proto)]), args.num_proto, args.label_smoothing)
+            proto_labels = one_hot(torch.tensor([i for i in range(args.num_proto)]), args.num_proto,
+                                   args.label_smoothing)
 
         if not args.freeze_proto:
             prototypes.requires_grad = True
@@ -267,7 +262,7 @@ def train_dino(args):
     celoss = nn.BCEWithLogitsLoss()
     # -- init feature pre losses
     msn = init_msn_loss(
-        num_views= args.focal_views_number + args.rand_views_number,
+        num_views=args.focal_views_number + args.local_crops_number,
         tau=args.loss_temperature,
         me_max=args.me_max,
         return_preds=True)
@@ -310,7 +305,9 @@ def train_dino(args):
         student=student,
         teacher=teacher,
         optimizer=optimizer,
+        prototypes=prototypes,
         fp16_scaler=fp16_scaler,
+
         # dino_loss=dino_loss,
     )
 
@@ -322,15 +319,16 @@ def train_dino(args):
         data_loader.sampler.set_epoch(epoch)
 
         # ============ training one epoch of DINO ... ============
-        train_stats = train_one_epoch(logger, student, teacher, teacher_without_ddp,
-            data_loader, optimizer, lr_schedule, wd_schedule, momentum_schedule,
-            epoch, fp16_scaler, neck, celoss, msn, proto_labels, prototypes, output_dim, args)
+        train_stats = train_one_epoch(logger, segdino,
+                                      data_loader, optimizer, lr_schedule, wd_schedule, momentum_schedule,
+                                      epoch, fp16_scaler, celoss, msn, proto_labels, prototypes, output_dim, args)
 
         # ============ writing logs ... ============
         save_dict = {
-            'student': student.state_dict(),
-            'teacher': teacher.state_dict(),
+            'student': segdino.student.state_dict(),
+            'teacher': segdino.teacher.state_dict(),
             'optimizer': optimizer.state_dict(),
+            'prototypes': prototypes.data,
             'epoch': epoch + 1,
             'args': args,
             # 'dino_loss': dino_loss.state_dict(),
@@ -338,7 +336,7 @@ def train_dino(args):
         if fp16_scaler is not None:
             save_dict['fp16_scaler'] = fp16_scaler.state_dict()
         utils.save_on_master(save_dict, os.path.join(args.output_dir, 'checkpoint.pth'))
-        if args.saveckp_freq and epoch % args.saveckp_freq == 0 or epoch == args.epoch:
+        if args.saveckp_freq and epoch % args.saveckp_freq == 0 or epoch == args.epochs:
             utils.save_on_master(save_dict, os.path.join(args.output_dir, f'checkpoint{epoch:04}.pth'))
         log_stats = {'epoch': epoch, **{f'train_{k}': v for k, v in train_stats.items()},
                      }
@@ -351,12 +349,13 @@ def train_dino(args):
     logger.info('Training time {}'.format(total_time_str))
 
 
-def train_one_epoch(logger, student, teacher, teacher_without_ddp, data_loader,
+def train_one_epoch(logger, segdino, data_loader,
                     optimizer, lr_schedule, wd_schedule, momentum_schedule, epoch,
-                    fp16_scaler, neck, celoss, msn, proto_labels, prototypes, output_dim, args):
+                    fp16_scaler, celoss, msn, proto_labels, prototypes, output_dim, args):
+
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
-    for it, (view1, view2, target, resized_32_mask, img_mate) in enumerate(metric_logger.log_every(data_loader, 10, header, logger)):
+    for it, (target, anchors, mask_labels, img_mate) in enumerate(metric_logger.log_every(data_loader, 10, header, logger)):
         # update weight decay and learning rate according to their schedule
         it = len(data_loader) * epoch + it  # global training iteration
         for i, param_group in enumerate(optimizer.param_groups):
@@ -365,67 +364,57 @@ def train_one_epoch(logger, student, teacher, teacher_without_ddp, data_loader,
                 param_group["weight_decay"] = wd_schedule[it]
 
         # move images to gpu
-        view1 = [im.cuda(non_blocking=True) for im in view1]
-        view2 = [im.cuda(non_blocking=True) for im in view2]
-        # print(len(view1),view1)
-        # print(numpy.unique(target[0]))
-        # print(img_mate)
-        # ids_retores = resized_32_mask
-        # print(ids_retores[0].sum())
-        # print(ids_retores[1].sum())
-        # ids_retores = ids_retores.bool().reshape(2,-1).unsqueeze(2).cuda()
-        # print(np.unique(ids_retores),ids_retores,ids_retores.size())
-        # print(ids_retores)
-        # ids_retores = torch.repeat_interleave(ids_retores, repeats=384, dim=2)
-        # print(ids_retores)
-        # print(ids_retores.sum())
+        anchors = [im.cuda(non_blocking=True) for im in anchors]
+        mask_labels = [ t.cuda(non_blocking=True).flatten(1) for t in mask_labels ]  # [B, 64, 64] to [B, 4096] laction mask ground true
 
-        target = target.cuda()
-        target = target.flatten(1) # [B, 64, 64] to [B, 4096] laction mask ground true
+        ploss_meter = AverageMeter()
+        rloss_meter = AverageMeter()
+        eloss_meter = AverageMeter()
+        BCEloss_meter = AverageMeter()
 
         # teacher and student forward passes + compute dino loss
         with torch.cuda.amp.autocast(fp16_scaler is not None):
-            teacher_output = teacher(view1)  # only the 2 global views pass through the teacher
-            student_output = student(view2)
-            # print("teacher_output.size(): ", teacher_output.size())
-            # print("student_output.size(): ", student_output.size())
-            # loss = dino_loss(student_output, teacher_output, epoch)
-            pre_mask, student_output_2mlp, teacher_output_2mlp = neck(student_output, teacher_output)
-            # print(target.size())
-            BCEloss = celoss(pre_mask, target.float())
-            # print(BCEloss)
+            pre_mask_list, student_output_2mlp_list, teacher_output_2mlp = segdino(target, anchors)
+            for pre_id in range(len(pre_mask_list)):
+                BCEloss = celoss(pre_mask_list[pre_id], mask_labels[pre_id].float())
+                BCEloss_meter.update(BCEloss)
 
-            teacher_output = teacher_output.float().detach()
             # Step 3. compute patch-based feature loss with me-max regularization. the features without via two mlp
-            # print(teacher_output.size())
-            # print(ids_retores.size())
-            # teacher_output = torch.masked_select(teacher_output, ids_retores).reshape(2,196,-1)
-            teacher_output_resized = []
-            for i in range(teacher_output.size()[0]):
-                X = img_mate['crop32'][0][i]
-                Y = img_mate['crop32'][1][i]
-                W = img_mate['crop32'][2][i]
-                H = img_mate['crop32'][3][i]
-                # print("teacher_output[i].size():", teacher_output[i].size()) #[1024, 384]
-                tem = teacher_output[i].transpose(1,0).reshape(-1,32,32)[:, Y:Y+H, X:X+W].unsqueeze(0)
-                # # [1024, 384]=>[384, 1024]=>[384, 32, 32]=>croped:[384, H, W] => [1, 384, H, W]
-                # print("tem.size()",tem.size())# [1, 384, H, W]
-                tem = nn.functional.interpolate(tem, size=[14, 14], mode="bilinear") # [1, 384, H, W] => [1, 384, 14, 14]
-                teacher_output_resized.append(tem)
-            teacher_output_resized = torch.stack(teacher_output_resized, dim=0)
+            teacher_output = teacher_output_2mlp.float().detach() # 32,198,384
+            teacher_output_resized_list = []
+            for j in range(len(pre_mask_list)): # number of crops
+                teacher_output_resized = []
+                for i in range(teacher_output.size()[0]): # number of batch
+                    X = img_mate['croped_from'][j][0][i]
+                    Y = img_mate['croped_from'][j][1][i]
+                    W = img_mate['croped_from'][j][2][i]
+                    H = img_mate['croped_from'][j][3][i]
+                    # print("teacher_output[i].size():", teacher_output[i].size()) #[1024, 384]
+                    # tem = teacher_output[i].transpose(1,0).reshape(-1,32,32)[:, Y:Y+H, X:X+W].unsqueeze(0)
+                    tem = teacher_output[i].transpose(1, 0).reshape(-1, 14, 14)[:, Y:Y + H, X:X + W].unsqueeze(0)
+                    # # [1024, 384]=>[384, 1024]=>[384, 32, 32]=>croped:[384, H, W] => [1, 384, H, W]
+                    # print("tem.size()",tem.size())# [1, 384, H, W]
+                    # tem = nn.functional.interpolate(tem, size=[14, 14], mode="bilinear") # [1, 384, H, W] => [1, 384, 14, 14]
+                    tem = nn.functional.interpolate(tem, size=[6, 6], mode="bilinear")  # [1, 384, H, W] => [1, 384, 14, 14]
+                    teacher_output_resized.append(tem)
+                teacher_output_resized = torch.stack(teacher_output_resized, dim=0)
+                teacher_output_resized = teacher_output_resized.reshape(args.batch_size_per_gpu, 1, output_dim, -1) \
+                    .squeeze(1).transpose(2,1)  # target_croped size: [B, 384, 14, 14] =>[B, 1, 384, 196] =>[B, 384, 196] =>[B, 196, 384]
+                teacher_output_resized_list.append(teacher_output_resized)
 
-            # print("teacher_output_resized.size():",teacher_output_resized.size())
-            teacher_output_resized = teacher_output_resized.reshape(args.batch_size_per_gpu, 1, output_dim, -1).squeeze(1).transpose(2, 1)
-            # target_croped size: [B, 384, 14, 14] =>[B, 1, 384, 196] =>[B, 384, 196] =>[B, 196, 384]
-            (ploss, res_me_max, res_ent, logs, _) = msn(
-                use_sinkhorn=args.use_sinkhorn,
-                use_entropy=args.use_ent,
-                anchor_views=student_output_2mlp.float(), # [B, 196, 384] # after a mlp head
-                target_views=teacher_output_resized, # [B, 196, 384] # without a mlp head
-                proto_labels=proto_labels,
-                prototypes=prototypes)
+            for stu_out_id in range(len(student_output_2mlp_list)): # number of crops
+                (ploss, res_me_max, res_ent, logs, _) = msn(
+                    use_sinkhorn=args.use_sinkhorn,
+                    use_entropy=args.use_ent,
+                    anchor_views=student_output_2mlp_list[stu_out_id].float(),  # [B, 196, 384] # after a mlp head
+                    target_views=teacher_output_resized_list[stu_out_id],  # [B, 196, 384] # without a mlp head
+                    proto_labels=proto_labels,
+                    prototypes=prototypes)
+                ploss_meter.update(ploss)
+                rloss_meter.update(res_me_max)
+                eloss_meter.update(res_ent)
 
-            loss = ploss + args.memax_weight * res_me_max + args.ent_weight * res_ent + BCEloss
+            loss = 0.1*ploss_meter.avg + args.memax_weight * rloss_meter.avg + args.ent_weight * eloss_meter.avg + BCEloss_meter.avg
 
         if not math.isfinite(loss.item()):
             logger.error("Loss is {}, stopping training".format(loss.item()), force=True)
@@ -437,16 +426,16 @@ def train_one_epoch(logger, student, teacher, teacher_without_ddp, data_loader,
         if fp16_scaler is None:
             loss.backward()
             if args.clip_grad:
-                param_norms = utils.clip_gradients(student, args.clip_grad)
-            utils.cancel_gradients_last_layer(epoch, student,
+                param_norms = utils.clip_gradients(segdino.student, args.clip_grad)
+            utils.cancel_gradients_last_layer(epoch, segdino.student,
                                               args.freeze_last_layer)
             optimizer.step()
         else:
             fp16_scaler.scale(loss).backward()
             if args.clip_grad:
                 fp16_scaler.unscale_(optimizer)  # unscale the gradients of optimizer's assigned params in-place
-                param_norms = utils.clip_gradients(student, args.clip_grad)
-            utils.cancel_gradients_last_layer(epoch, student,
+                param_norms = utils.clip_gradients(segdino.student, args.clip_grad)
+            utils.cancel_gradients_last_layer(epoch, segdino.student,
                                               args.freeze_last_layer)
             fp16_scaler.step(optimizer)
             fp16_scaler.update()
@@ -454,23 +443,44 @@ def train_one_epoch(logger, student, teacher, teacher_without_ddp, data_loader,
         # EMA update for the teacher
         with torch.no_grad():
             prototypes.grad.data = AllReduceSum.apply(prototypes.grad.data)
-
             m = momentum_schedule[it]  # momentum parameter
-            for param_q, param_k in zip(student.module.parameters(), teacher_without_ddp.parameters()):
+            for param_q, param_k in zip(segdino.student.module.parameters(), segdino.teacher.parameters()):
                 param_k.data.mul_(m).add_((1 - m) * param_q.detach().data)
-
 
         # logging
         torch.cuda.synchronize()
         metric_logger.update(loss=loss.item())
-        metric_logger.update(BCEloss=BCEloss.item(), ploss=ploss.item(), res_me_max=res_me_max.item(), res_ent=res_ent.item())
+        metric_logger.update(BCEloss=BCEloss.item(), ploss=ploss.item(), res_me_max=res_me_max.item(),
+                             res_ent=res_ent.item())
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(wd=optimizer.param_groups[0]["weight_decay"])
+
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
-    logger.info("Averaged stats:", str(metric_logger))
+    logger.info("Averaged stats:"+str(metric_logger))
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
+class AverageMeter(object):
+    """computes and stores the average and current value"""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.max = float('-inf')
+        self.min = float('inf')
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.max = max(val, self.max)
+        self.min = min(val, self.min)
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('SegDINO', parents=[get_args_parser()])

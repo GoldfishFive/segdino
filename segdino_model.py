@@ -14,49 +14,36 @@ class SegDINO(nn.Module):
     concatenated features.
     """
 
-    def __init__(self, backbone):
+    def __init__(self, student, teacher, neck):
         super(SegDINO, self).__init__()
-        # disable layers dedicated to ImageNet labels classification
-        backbone.fc, backbone.head = nn.Identity(), nn.Identity()
-        self.backbone = backbone
-        # self.neck = neck
-        # self.head = head
+        student.fc, student.head = nn.Identity(), nn.Identity()
+        teacher.fc, teacher.head = nn.Identity(), nn.Identity()
+        self.student = student
+        self.teacher = teacher
+        self.neck = neck
 
-    def forward(self, x):
+    def forward(self,t, x):
         # print(len(x))
         # convert to list
         if not isinstance(x, list):
             x = [x]
         # print(torch.tensor([inp.shape[-1] for inp in x]))
 
-        idx_crops = torch.cumsum(torch.unique_consecutive(
-            torch.tensor([inp.shape[-1] for inp in x]),
-            return_counts=True,
-        )[1], 0)
-        #batch中每个图像大小都一样
-        # print("idx_crops:",idx_crops)#idx_crops: tensor([1])
+        teacher_output = self.teacher(t)  # only the 2 global views pass through the teacher
+        student_output = []
+        for idx in range(len(x)):
+            student_output.append(self.student(x[idx]))
 
-        start_idx, output = 0, torch.empty(0).to(x[0].device)
-        for end_idx in idx_crops:
-            _out = self.backbone(torch.cat(x[start_idx: end_idx]))
-            # print(_out.size())
-            # The output is a tuple with XCiT model. See:
-            # https://github.com/facebookresearch/xcit/blob/master/xcit.py#L404-L405
-            if isinstance(_out, tuple):
-                _out = _out[0]
-            # accumulate outputs
-            output = torch.cat((output, _out))
-            start_idx = end_idx
-        # Run the head forward on the concatenated features.
-        # return self.head(output)
-        return output
+        return self.neck(teacher_output, student_output)
 
 class CrossAttention(nn.Module):
     def __init__(self, dim, out_dim, num_heads=8, qkv_bias=False, qk_scale=None):
         super().__init__()
         self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = qk_scale or head_dim ** -0.5 # self.scale=0.125
+        # head_dim = dim // num_heads
+        # self.scale = qk_scale or head_dim ** -0.5 # self.scale=0.125
+        head_dim = dim
+        self.scale = head_dim ** -0.5 # self.scale=0.125
 
         self.q = nn.Linear(dim, dim, bias=qkv_bias)
         self.k = nn.Linear(dim, dim, bias=qkv_bias)
@@ -96,9 +83,8 @@ class CrossAttention(nn.Module):
         # x = self.proj(x)
         return x
 
-
 class Neck(nn.Module):
-    def __init__(self,input_dim=384, decoder_emd_dim=512, cross_atte_out_dim=256, mask_ratio=0.8):
+    def __init__(self,input_dim=384, decoder_emd_dim=256, cross_atte_out_dim=128, mask_ratio=0.8):
         super().__init__()
         self.input_dim = input_dim
         self.decoder_emd_dim = decoder_emd_dim
@@ -128,6 +114,38 @@ class Neck(nn.Module):
 
         self._initialize_weights()
 
+    def forward(self, t, x):
+        t_ = self.mlp_t(t) # B, 196, 512/B, 36, 512
+        t = self.t_fc(t)
+        t = self.norm_t(t)
+        t = self.t_relu(t)
+        t, mask, ids_restore = self.random_masking(t, self.mask_ratio)
+
+        _x_list = []
+        x_list = []
+        for idx in range(len(x)):
+            _x_list.append(self.mlp_x(x[idx]))# B, 1024, 512/B, 196, 512
+            y = self.x_fc(x[idx])
+            y = self.norm_x(y)
+            y = self.x_relu(y)
+
+            y = self.cross_attention(y, t)
+            y = self.norm_cross(y)
+            y = self.relu_cross(y)
+            y = self.fc_head(y)
+
+            # #when using masked_target as query
+            B, N, C = y.shape # when using masking and mask_ratio=0.8 ## B,1024*0.2,1 = B,204,1
+            # x= self.upSampling(x.reshape(B, 1, 17, 12)) # [B, 204, 1]=>B,1,17,12=>B,1,64,64 掩模的比例不同，剩下的特征数不一样，需要reshape后才能上采样输出特征图
+            y= self.upSampling(y.reshape(B, 1, 7, 7)) # [B, 204, 1]=>B,1,17,12=>B,1,64,64 掩模的比例不同，剩下的特征数不一样，需要reshape后才能上采样输出特征图
+            # x = nn.functional.interpolate(x.reshape(B, 1, 17, 12), size=[64, 64], mode="nearest")
+            # print("x.size():",x.size())
+            y = y.reshape(B, -1)
+            # print("x.size():",x.size())
+            x_list.append(y)
+
+        return x_list, _x_list, t_
+
     def random_masking(self, x, mask_ratio):
         """
         Perform per-sample random masking by per-sample shuffling.
@@ -154,44 +172,6 @@ class Neck(nn.Module):
         mask = torch.gather(mask, dim=1, index=ids_restore)
 
         return x_masked, mask, ids_restore
-
-    def forward(self, x, t):
-        x_ = self.mlp_x(x)
-        t_ = self.mlp_t(t)
-        # print("x_.size():", x_.size())
-        # print("t_.size():", t_.size())
-
-        x = self.x_fc(x)
-        t = self.t_fc(t)
-        x = self.norm_x(x)
-        t = self.norm_t(t)
-        x = self.x_relu(x)
-        t = self.t_relu(t)
-
-        t, mask, ids_restore = self.random_masking(t, self.mask_ratio)
-        # print(x,x.size())
-        # print(t,t.size())
-        x = self.cross_attention(x, t)
-        x = self.norm_cross(x)
-        x = self.relu_cross(x)
-        x = self.fc_head(x)
-
-        # #when using masked_target as query
-        B, N, C = x.shape # when using masking and mask_ratio=0.8 ## B,1024*0.2,1 = B,204,1
-        x= self.upSampling(x.reshape(B, 1, 17, 12)) # [B, 204, 1]=>B,1,17,12=>B,1,64,64 掩模的比例不同，剩下的特征数不一样，需要reshape后才能上采样输出特征图
-        # x = nn.functional.interpolate(x.reshape(B, 1, 17, 12), size=[64, 64], mode="nearest")
-        # print("x.size():",x.size())
-        x =  x.reshape(B, -1)
-        # print("x.size():",x.size())
-
-
-
-        # B, N, C = x.shape # when using anchor as query and using masking with mask_ratio=0.8 ## B,196,1
-        # x= self.upSampling(x.reshape(B, 1, 14, 14)) # [B, 204, 1]=>B,1,14,14=>B,1,64,64
-        # x =  x.reshape(B, -1)
-        # #print("x.size():",x.size())
-
-        return x, x_, t_
 
     def _initialize_weights(self):
         for m in self.modules():
@@ -239,7 +219,7 @@ class DINOHead(nn.Module):
 
     def forward(self, x):
         x = self.mlp(x)
-        x = nn.functional.normalize(x, dim=-1, p=2)
+        x = nn.functional.normalize(x, dim=-1, p=2) # 将某一个维度除以那个维度对应的范数(默认是2范数)。
         x = self.last_layer(x)
         return x
 

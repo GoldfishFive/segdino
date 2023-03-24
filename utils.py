@@ -163,8 +163,13 @@ def restart_from_checkpoint(ckp_path, run_variables=None, **kwargs):
     # key is what to look for in the checkpoint file
     # value is the object to load
     # example: {'state_dict': model}
+    # -- loading prototypes
+    if (kwargs['prototypes'] is not None) and ('prototypes' in checkpoint):
+        with torch.no_grad():
+            kwargs['prototypes'].data = checkpoint['prototypes'].to('cuda')
+
     for key, value in kwargs.items():
-        if key in checkpoint and value is not None:
+        if key in checkpoint and value is not None and key != 'prototypes':
             try:
                 msg = value.load_state_dict(checkpoint[key], strict=False)
                 print("=> loaded '{}' from checkpoint '{}' with msg {}".format(key, ckp_path, msg))
