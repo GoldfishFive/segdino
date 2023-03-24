@@ -41,7 +41,6 @@ torchvision_archs = sorted(name for name in torchvision_models.__dict__
 
 def get_args_parser():
     parser = argparse.ArgumentParser('SegDINO', add_help=False)
-
     # Model parameters
     parser.add_argument('--arch', default='vit_small', type=str,
                         choices=['vit_tiny', 'vit_small', 'vit_base', 'xcit', 'deit_tiny', 'deit_small'] \
@@ -88,14 +87,14 @@ def get_args_parser():
         help optimization for larger ViT architectures. 0 for disabling.""")
     parser.add_argument('--batch_size_per_gpu', default=48, type=int,
                         help='48  Per-GPU batch-size : number of distinct images loaded on one GPU.')
-    parser.add_argument('--epochs', default=600, type=int, help='Number of epochs of training.')
+
     parser.add_argument('--freeze_last_layer', default=1, type=int, help="""Number of epochs
         during which we keep the output layer fixed. Typically doing so during
         the first epoch helps training. Try increasing this value if the loss does not decrease.""")
     parser.add_argument("--lr", default=0.0006, type=float, help="""0.0005 Learning rate at the end of
         linear warmup (highest LR used during training). The learning rate is linearly scaled
         with the batch size, and specified here for a reference batch size of 256.""")
-    parser.add_argument("--warmup_epochs", default=10, type=int,
+    parser.add_argument("--warmup_epochs", default=1, type=int,
                         help="Number of epochs for the linear learning-rate warm up.")
     parser.add_argument('--min_lr', type=float, default=1e-8, help="""Target LR at the
         end of optimization. We use a cosine LR schedule with linear warmup.""")
@@ -134,10 +133,11 @@ def get_args_parser():
     parser.add_argument('--memax_weight', default=0.1, type=float, help="default= 1.0;cosine similarity temperature")
 
     # Misc
-    parser.add_argument('--data_path', default='/media/data1/wjy/dataset/loveda/Train/',
+    parser.add_argument('--data_path', default='/media/data1/wjy/dataset/loveda/Test/',
                         type=str,help='Please specify path to the ImageNet training data.')
     parser.add_argument('--output_dir', default="./exps/0323/", type=str, help='Path to save logs and checkpoints.')
-    parser.add_argument('--saveckp_freq', default=50, type=int, help='Save checkpoint every x epochs.')
+    parser.add_argument('--epochs', default=4, type=int, help='Number of epochs of training.')
+    parser.add_argument('--saveckp_freq', default=2, type=int, help='Save checkpoint every x epochs.')
     parser.add_argument('--seed', default=0, type=int, help='Random seed.')
     parser.add_argument('--num_workers', default=10, type=int, help='Number of data loading workers per GPU.')
     parser.add_argument("--dist_url", default="env://", type=str, help="""url used to set up
@@ -307,12 +307,11 @@ def train_dino(args):
         optimizer=optimizer,
         prototypes=prototypes,
         fp16_scaler=fp16_scaler,
-
         # dino_loss=dino_loss,
     )
 
     start_epoch = to_restore["epoch"]
-
+    
     start_time = time.time()
     logger.info("Starting SegDINO training !")
     for epoch in range(start_epoch, args.epochs):
@@ -335,9 +334,12 @@ def train_dino(args):
         }
         if fp16_scaler is not None:
             save_dict['fp16_scaler'] = fp16_scaler.state_dict()
+
         utils.save_on_master(save_dict, os.path.join(args.output_dir, 'checkpoint.pth'))
-        if args.saveckp_freq and epoch % args.saveckp_freq == 0 or epoch == args.epochs:
-            utils.save_on_master(save_dict, os.path.join(args.output_dir, f'checkpoint{epoch:04}.pth'))
+        print("epoch:",epoch, args.saveckp_freq)
+        print((epoch+1) % args.saveckp_freq)
+        if args.saveckp_freq and (epoch+1) % args.saveckp_freq == 0 or (epoch+1) == args.epochs:
+            utils.save_on_master(save_dict, os.path.join(args.output_dir, f'checkpoint{epoch+1:04}.pth'))
         log_stats = {'epoch': epoch, **{f'train_{k}': v for k, v in train_stats.items()},
                      }
         if utils.is_main_process():
@@ -354,7 +356,7 @@ def train_one_epoch(logger, segdino, data_loader,
                     fp16_scaler, celoss, msn, proto_labels, prototypes, output_dim, args):
 
     metric_logger = utils.MetricLogger(delimiter="  ")
-    header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
+    header = 'Epoch: [{}/{}]'.format(epoch+1, args.epochs)
     for it, (target, anchors, mask_labels, img_mate) in enumerate(metric_logger.log_every(data_loader, 10, header, logger)):
         # update weight decay and learning rate according to their schedule
         it = len(data_loader) * epoch + it  # global training iteration
