@@ -78,7 +78,8 @@ def init_msn_loss(num_views=1, tau=0.1, me_max=True, return_preds=False):
 
         # Step 2: compute targets for anchor predictions
         with torch.no_grad():
-            targets = sharpen(snn(target_views, prototypes, proto_labels), T=T)
+            # targets = sharpen(snn(target_views, prototypes, proto_labels), T=T)
+            targets = snn(target_views, prototypes, proto_labels)
             # print(probs.size(), targets.size(),num_views)
 
             if use_sinkhorn:
@@ -118,7 +119,6 @@ def init_msn_loss(num_views=1, tau=0.1, me_max=True, return_preds=False):
         # -- loggings
         with torch.no_grad():
             targets_argmax = targets.argmax(dim=1)
-
             # num_ps = float(len(set(targets.argmax(dim=1).tolist())))
             num_ps = None
             max_t = targets.max(dim=1).values.mean()

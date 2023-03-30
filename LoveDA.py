@@ -8,10 +8,11 @@ from torch.utils.data import Dataset
 import cv2
 from torchvision import transforms
 import utils
-from PIL import Image
+from PIL import Image, ImageFile
 
 import torchvision.transforms.functional as F
-
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+Image.MAX_IMAGE_PIXELS = None
 class DataAugmentationDINO(object):
     def __init__(self):
         flip_and_color_jitter = transforms.Compose([
@@ -127,6 +128,7 @@ class LoveDAdataset(Dataset):
 
     def __len__(self):
         return len(self.imglist)
+
 
 
 if __name__ == "__main__":

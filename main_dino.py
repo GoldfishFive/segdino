@@ -85,16 +85,15 @@ def get_args_parser():
     parser.add_argument('--clip_grad', type=float, default=3.0, help="""Maximal parameter
         gradient norm if using gradient clipping. Clipping with norm .3 ~ 1.0 can
         help optimization for larger ViT architectures. 0 for disabling.""")
-    parser.add_argument('--batch_size_per_gpu', default=48, type=int,
-                        help='48  Per-GPU batch-size : number of distinct images loaded on one GPU.')
+
 
     parser.add_argument('--freeze_last_layer', default=1, type=int, help="""Number of epochs
         during which we keep the output layer fixed. Typically doing so during
         the first epoch helps training. Try increasing this value if the loss does not decrease.""")
-    parser.add_argument("--lr", default=0.0006, type=float, help="""0.0005 Learning rate at the end of
+    parser.add_argument("--lr", default=0.0005, type=float, help="""0.0005 Learning rate at the end of
         linear warmup (highest LR used during training). The learning rate is linearly scaled
         with the batch size, and specified here for a reference batch size of 256.""")
-    parser.add_argument("--warmup_epochs", default=1, type=int,
+    parser.add_argument("--warmup_epochs", default=10, type=int,
                         help="Number of epochs for the linear learning-rate warm up.")
     parser.add_argument('--min_lr', type=float, default=1e-8, help="""Target LR at the
         end of optimization. We use a cosine LR schedule with linear warmup.""")
@@ -108,7 +107,7 @@ def get_args_parser():
                         help="""Scale range of the cropped image before resizing, relatively to the origin image.
         Used for small local view cropping of multi-crop.""")
 
-    parser.add_argument('--num_proto', default=64, type=int, help="""K learnable prototypes""")
+    parser.add_argument('--num_proto', default=1024, type=int, help="""K learnable prototypes""")
     parser.add_argument('--freeze_proto', default=False, type=bool, help="""whether to freeze prototypes or not""")
 
     """ target==>global;anchor==>local"""
@@ -126,18 +125,21 @@ def get_args_parser():
     ## loss
     parser.add_argument('--label_smoothing', default=0.0, type=float, help="label_smoothing for prototypes")
     parser.add_argument('--loss_temperature', default=0.1, type=float, help="cosine similarity temperature")
-    parser.add_argument('--use_sinkhorn', default=True, type=bool, help="sinkhorn to find the bast matching")
-    parser.add_argument('--use_ent', default=True, type=bool, help="sinkhorn to find the bast matching")
-    parser.add_argument('--ent_weight', default=0.1, type=float, help="cosine similarity temperature")
+    parser.add_argument('--use_sinkhorn', default=False, type=bool, help="sinkhorn to find the bast matching")
+    parser.add_argument('--use_ent', default=False, type=bool, help="default=True")
+    parser.add_argument('--ent_weight', default=0.0, type=float, help="default=0  cosine similarity temperature")
     parser.add_argument('--me_max', default=True, type=bool, help="sinkhorn to find the bast matching")
-    parser.add_argument('--memax_weight', default=0.1, type=float, help="default= 1.0;cosine similarity temperature")
+    parser.add_argument('--memax_weight', default=0.0, type=float, help="default= 1.0;cosine similarity temperature")
+    parser.add_argument('--ploss_weight', default=1.0, type=float, help="default= 1.0;")
 
     # Misc
     parser.add_argument('--data_path', default='/media/data1/wjy/dataset/loveda/Test/',
                         type=str,help='Please specify path to the ImageNet training data.')
     parser.add_argument('--output_dir', default="./exps/0323/", type=str, help='Path to save logs and checkpoints.')
-    parser.add_argument('--epochs', default=4, type=int, help='Number of epochs of training.')
-    parser.add_argument('--saveckp_freq', default=2, type=int, help='Save checkpoint every x epochs.')
+    parser.add_argument('--epochs', default=100, type=int, help='Number of epochs of training.')
+    parser.add_argument('--saveckp_freq', default=50, type=int, help='Save checkpoint every x epochs.')
+    parser.add_argument('--batch_size_per_gpu', default=48, type=int,
+                        help='48  Per-GPU batch-size : number of distinct images loaded on one GPU.')
     parser.add_argument('--seed', default=0, type=int, help='Random seed.')
     parser.add_argument('--num_workers', default=10, type=int, help='Number of data loading workers per GPU.')
     parser.add_argument("--dist_url", default="env://", type=str, help="""url used to set up
@@ -268,7 +270,8 @@ def train_dino(args):
         return_preds=True)
 
     # ============ preparing optimizer ... ============
-    params_groups = utils.get_params_groups(student)
+    # params_groups = utils.get_params_groups(student)
+    params_groups = utils.get_params_groups(segdino)
     if args.optimizer == "adamw":
         optimizer = torch.optim.AdamW(params_groups)  # to use with ViTs
     elif args.optimizer == "sgd":
@@ -282,7 +285,7 @@ def train_dino(args):
 
     # ============ init schedulers ... ============
     lr_schedule = utils.cosine_scheduler(
-        args.lr * (args.batch_size_per_gpu * utils.get_world_size()) / 4.,  # linear scaling rule
+        args.lr * (args.batch_size_per_gpu * utils.get_world_size()) / args.batch_size_per_gpu,  # linear scaling rule
         args.min_lr,
         args.epochs, len(data_loader),
         warmup_epochs=args.warmup_epochs,
@@ -336,14 +339,12 @@ def train_dino(args):
             save_dict['fp16_scaler'] = fp16_scaler.state_dict()
 
         utils.save_on_master(save_dict, os.path.join(args.output_dir, 'checkpoint.pth'))
-        print("epoch:",epoch, args.saveckp_freq)
-        print((epoch+1) % args.saveckp_freq)
         if args.saveckp_freq and (epoch+1) % args.saveckp_freq == 0 or (epoch+1) == args.epochs:
             utils.save_on_master(save_dict, os.path.join(args.output_dir, f'checkpoint{epoch+1:04}.pth'))
         log_stats = {'epoch': epoch, **{f'train_{k}': v for k, v in train_stats.items()},
                      }
         if utils.is_main_process():
-            logger.info(log_stats)
+            # logger.info(log_stats)
             with (Path(args.output_dir) / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
     total_time = time.time() - start_time
@@ -382,7 +383,8 @@ def train_one_epoch(logger, segdino, data_loader,
                 BCEloss_meter.update(BCEloss)
 
             # Step 3. compute patch-based feature loss with me-max regularization. the features without via two mlp
-            teacher_output = teacher_output_2mlp.float().detach() # 32,198,384
+            # teacher_output = teacher_output_2mlp.float().detach() # 32,198,384
+            teacher_output = teacher_output_2mlp.float()# 32,198,384
             teacher_output_resized_list = []
             for j in range(len(pre_mask_list)): # number of crops
                 teacher_output_resized = []
@@ -416,22 +418,38 @@ def train_one_epoch(logger, segdino, data_loader,
                 rloss_meter.update(res_me_max)
                 eloss_meter.update(res_ent)
 
-            loss = 0.1*ploss_meter.avg + args.memax_weight * rloss_meter.avg + args.ent_weight * eloss_meter.avg + BCEloss_meter.avg
+            loss = BCEloss_meter.avg + args.ploss_weight*ploss_meter.avg + args.memax_weight * rloss_meter.avg + args.ent_weight * eloss_meter.avg
 
         if not math.isfinite(loss.item()):
-            logger.error("Loss is {}, stopping training".format(loss.item()), force=True)
+            logger.error("Loss is {}, stopping training".format(loss.item()))
             sys.exit(1)
 
         # student update
         optimizer.zero_grad()
         param_norms = None
         if fp16_scaler is None:
+            # print("fp16_scaler is None")
+            # for name, parms in segdino.named_parameters():
+            #     if "neck" in name:
+            #         print('-->name:', name)
+            #         print('-->para:', parms)
+            #         print('-->grad_requirs:', parms.requires_grad)
+            #         print('-->grad_value:', parms.grad)
+            #         print("="*50)
             loss.backward()
             if args.clip_grad:
                 param_norms = utils.clip_gradients(segdino.student, args.clip_grad)
             utils.cancel_gradients_last_layer(epoch, segdino.student,
                                               args.freeze_last_layer)
             optimizer.step()
+            # print("=============更新之后===========")
+            # for name, parms in segdino.named_parameters():
+            #     if "neck" in name:
+            #         print('-->name:', name)
+            #         print('-->para:', parms)
+            #         print('-->grad_requirs:', parms.requires_grad)
+            #         print('-->grad_value:', parms.grad)
+            #         print("="*50)
         else:
             fp16_scaler.scale(loss).backward()
             if args.clip_grad:
@@ -441,6 +459,8 @@ def train_one_epoch(logger, segdino, data_loader,
                                               args.freeze_last_layer)
             fp16_scaler.step(optimizer)
             fp16_scaler.update()
+
+        # exit(0)
 
         # EMA update for the teacher
         with torch.no_grad():
@@ -452,9 +472,9 @@ def train_one_epoch(logger, segdino, data_loader,
         # logging
         torch.cuda.synchronize()
         metric_logger.update(loss=loss.item())
-        metric_logger.update(BCEloss=BCEloss.item(), ploss=ploss.item(), res_me_max=res_me_max.item(),
-                             res_ent=res_ent.item())
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+        metric_logger.update(BCEloss=BCEloss_meter.avg, ploss=ploss_meter.avg, res_me_max=rloss_meter.avg,
+                             res_ent=eloss_meter.avg)
         metric_logger.update(wd=optimizer.param_groups[0]["weight_decay"])
 
     # gather the stats from all processes

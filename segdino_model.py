@@ -104,18 +104,21 @@ class Neck(nn.Module):
         self.norm_cross = nn.LayerNorm(self.cross_atte_out_dim)
         self.relu_cross = nn.ReLU()
 
+        # ## change for full conv head
         self.fc_head = nn.Linear(self.cross_atte_out_dim,1) # # B x L*(1-mask_ratio) X 1
         # self.upSampling =  nn.Upsample(scale_factor=(4), mode='nearest')#
         self.upSampling =  nn.Upsample(size=(64, 64), mode='nearest')# predict a Bx64x64 result
 
         # for patch-based feature loss
         self.mlp_x = Mlp(in_features=self.input_dim, hidden_features=self.decoder_emd_dim, act_layer=nn.GELU, drop=0.)
-        self.mlp_t = Mlp(in_features=self.input_dim, hidden_features=self.decoder_emd_dim, act_layer=nn.GELU, drop=0.)
+        # self.mlp_t = Mlp(in_features=self.input_dim, hidden_features=self.decoder_emd_dim, act_layer=nn.GELU, drop=0.)
 
         self._initialize_weights()
 
     def forward(self, t, x):
-        t_ = self.mlp_t(t) # B, 196, 512/B, 36, 512
+        # t_ = self.mlp_t(t) # B, 196, 512/B, 36, 512
+        t_ = t # teacher feature don't via projector
+
         t = self.t_fc(t)
         t = self.norm_t(t)
         t = self.t_relu(t)
