@@ -13,6 +13,7 @@ from PIL import Image, ImageFile
 import torchvision.transforms.functional as F
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 Image.MAX_IMAGE_PIXELS = None
+
 class DataAugmentationDINO(object):
     def __init__(self):
         flip_and_color_jitter = transforms.Compose([
@@ -25,22 +26,20 @@ class DataAugmentationDINO(object):
         ])
         normalize = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            # transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
         ])
 
         # first crop
         self.view_transform1 = transforms.Compose([
-            # transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=Image.BICUBIC),
-            flip_and_color_jitter,
-            utils.GaussianBlur(1.0),
+            # flip_and_color_jitter,
+            # utils.GaussianBlur(1.0),
             normalize,
         ])
         # second crop
         self.view_transform2 = transforms.Compose([
-            # transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=Image.BICUBIC),
-            flip_and_color_jitter,
-            utils.GaussianBlur(0.1),
-            # utils.Solarization(0.2), # ImageOps.solarize()将高于阈值的所有像素值反转，
+            # flip_and_color_jitter,
+            # utils.GaussianBlur(0.1),
+            # #utils.Solarization(0.2), # ImageOps.solarize()将高于阈值的所有像素值反转，
             normalize,
         ])
 
@@ -93,6 +92,7 @@ class LoveDAdataset(Dataset):
                 img2 = F.crop(img, i2, j2, h2, w2)
                 # print(i2, j2, h2, w2)
                 # print(type(img2),img2.size)
+                mask = Image.new('L', img.size)
                 mask2 = Image.new('L', img2.size, 1)
                 # mask2.save('imagestest/mask2.png')
                 S,T = img2.size # w2,h2
@@ -119,7 +119,8 @@ class LoveDAdataset(Dataset):
 
                 img_two = F.resize(img2, self.anchor_view.size,self.anchor_view.interpolation)
                 view2.append(self.transform(img_two, "view2"))  # second views for student
-                resized_mask.append(np.array(mask.resize((64, 64),Image.NEAREST)))
+                # resized_mask.append(np.array(mask.resize((64, 64),Image.NEAREST)))
+                resized_mask.append(np.array(mask.resize((224, 224),Image.NEAREST)))
 
             img_mate['crop_pos'] = crop_pos
             img_mate['croped_from'] = croped_from

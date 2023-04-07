@@ -38,6 +38,56 @@ class AllReduceSum(torch.autograd.Function):
     def backward(ctx, grads):
         return grads
 
+class FocalLoss():
+    def __init__(self, alpha=.25, gamma=2, reduction: str = "none",):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        inputs = inputs.float()
+        targets = targets.float()
+        # p = torch.sigmoid(inputs)
+        p = inputs
+        ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
+        p_t = p * targets + (1 - p) * (1 - targets)
+        loss = ce_loss * ((1 - p_t) ** self.gamma)
+
+        if self.alpha >= 0:
+            alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+            loss = alpha_t * loss
+        if self.reduction == "mean":
+            loss = loss.mean()
+        elif self.reduction == "sum":
+            loss = loss.sum()
+        return loss
+
+class WeightedFocalLoss(nn.Module):
+    "Non weighted version of Focal Loss"
+
+    def __init__(self, alpha=.25, gamma=2):
+        super(WeightedFocalLoss, self).__init__()
+        self.alpha = torch.tensor([alpha, 1 - alpha]).cuda()
+        self.gamma = gamma
+
+    def forward(self, inputs, targets):
+        # print('inputs.size()', inputs.size())
+        # print("targets.size()", targets.size())
+        # BCE_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        BCE_loss = F.binary_cross_entropy(inputs, targets, reduction='none') # 模型中有sigmoid了
+        # print(BCE_loss.size())
+        targets = targets.type(torch.long)
+        # print(self.alpha)
+        # print("alpha.size()", self.alpha.size())
+        at = self.alpha.gather(0, targets.data.reshape(-1)).reshape(targets.size()[0], -1)
+        # print(at)
+        # print("at.size()", at.size())
+        pt = torch.exp(-BCE_loss)
+        # print("pt.size()", pt.size())
+        F_loss = at * (1 - pt) ** self.gamma * BCE_loss
+        # print(F_loss.size())
+        return F_loss.mean(1).sum()
 
 def init_msn_loss(num_views=1, tau=0.1, me_max=True, return_preds=False):
     """

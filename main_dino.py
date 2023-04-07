@@ -18,6 +18,7 @@ import datetime
 import time
 import math
 import json
+import cv2
 import numpy as np
 from pathlib import Path
 import logging
@@ -25,14 +26,14 @@ from PIL import Image
 import torch
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
-from torchvision import datasets, transforms
+from torchvision import transforms
 from torchvision import models as torchvision_models
 
 import utils
 import vision_transformer as vits
-from segdino_model import DINOHead, SegDINO, Neck
+from segdino_model import SegDINO, Neck
 from LoveDA import LoveDAdataset, DataAugmentationDINO
-from segdino_loss import DINOLoss, init_msn_loss, AllReduceSum
+from segdino_loss import init_msn_loss, AllReduceSum, WeightedFocalLoss, FocalLoss
 
 torchvision_archs = sorted(name for name in torchvision_models.__dict__
                            if name.islower() and not name.startswith("__")
@@ -87,13 +88,13 @@ def get_args_parser():
         help optimization for larger ViT architectures. 0 for disabling.""")
 
 
-    parser.add_argument('--freeze_last_layer', default=1, type=int, help="""Number of epochs
+    parser.add_argument('--freeze_last_layer', default=0, type=int, help="""Number of epochs
         during which we keep the output layer fixed. Typically doing so during
         the first epoch helps training. Try increasing this value if the loss does not decrease.""")
-    parser.add_argument("--lr", default=0.0005, type=float, help="""0.0005 Learning rate at the end of
+    parser.add_argument("--lr", default=0.00005, type=float, help="""0.0005 Learning rate at the end of
         linear warmup (highest LR used during training). The learning rate is linearly scaled
         with the batch size, and specified here for a reference batch size of 256.""")
-    parser.add_argument("--warmup_epochs", default=10, type=int,
+    parser.add_argument("--warmup_epochs", default=1, type=int,
                         help="Number of epochs for the linear learning-rate warm up.")
     parser.add_argument('--min_lr', type=float, default=1e-8, help="""Target LR at the
         end of optimization. We use a cosine LR schedule with linear warmup.""")
@@ -124,19 +125,19 @@ def get_args_parser():
 
     ## loss
     parser.add_argument('--label_smoothing', default=0.0, type=float, help="label_smoothing for prototypes")
-    parser.add_argument('--loss_temperature', default=0.1, type=float, help="cosine similarity temperature")
+    parser.add_argument('--loss_temperature', default=0.05, type=float, help="0.1 cosine similarity temperature")
     parser.add_argument('--use_sinkhorn', default=False, type=bool, help="sinkhorn to find the bast matching")
     parser.add_argument('--use_ent', default=False, type=bool, help="default=True")
     parser.add_argument('--ent_weight', default=0.0, type=float, help="default=0  cosine similarity temperature")
     parser.add_argument('--me_max', default=True, type=bool, help="sinkhorn to find the bast matching")
     parser.add_argument('--memax_weight', default=0.0, type=float, help="default= 1.0;cosine similarity temperature")
-    parser.add_argument('--ploss_weight', default=1.0, type=float, help="default= 1.0;")
+    parser.add_argument('--ploss_weight', default=0.0, type=float, help="default= 1.0;")
 
     # Misc
     parser.add_argument('--data_path', default='/media/data1/wjy/dataset/loveda/Test/',
                         type=str,help='Please specify path to the ImageNet training data.')
     parser.add_argument('--output_dir', default="./exps/0323/", type=str, help='Path to save logs and checkpoints.')
-    parser.add_argument('--epochs', default=100, type=int, help='Number of epochs of training.')
+    parser.add_argument('--epochs', default=20, type=int, help='Number of epochs of training.')
     parser.add_argument('--saveckp_freq', default=50, type=int, help='Save checkpoint every x epochs.')
     parser.add_argument('--batch_size_per_gpu', default=48, type=int,
                         help='48  Per-GPU batch-size : number of distinct images loaded on one GPU.')
@@ -217,7 +218,7 @@ def train_dino(args):
     else:
         logger.error(f"Unknow architecture: {args.arch}")
 
-    neck = Neck(input_dim=output_dim, decoder_emd_dim=256, cross_atte_out_dim=128, mask_ratio=args.mask_ratio)
+    neck = Neck(input_dim=output_dim, decoder_emd_dim=256, mask_ratio=args.mask_ratio)
 
     # move networks to gpu
     student, teacher, neck = student.cuda(), teacher.cuda(), neck.cuda()
@@ -244,6 +245,7 @@ def train_dino(args):
 
     # multi-crop wrapper handles forward with inputs of different resolutions
     segdino = SegDINO(student, teacher, neck)
+    logger.info("Model = %s" % str(segdino))
 
     # -- make prototypes
     prototypes, proto_labels = None, None
@@ -261,7 +263,10 @@ def train_dino(args):
             prototypes.requires_grad = True
 
     # ============ preparing loss ... ============
-    celoss = nn.BCEWithLogitsLoss()
+    # celoss = nn.BCEWithLogitsLoss()
+    celoss = nn.BCELoss()
+    # focalloss = WeightedFocalLoss()
+    focalloss = FocalLoss()
     # -- init feature pre losses
     msn = init_msn_loss(
         num_views=args.focal_views_number + args.local_crops_number,
@@ -285,7 +290,7 @@ def train_dino(args):
 
     # ============ init schedulers ... ============
     lr_schedule = utils.cosine_scheduler(
-        args.lr * (args.batch_size_per_gpu * utils.get_world_size()) / args.batch_size_per_gpu,  # linear scaling rule
+        args.lr * (args.batch_size_per_gpu * utils.get_world_size()) / 256,  # linear scaling rule
         args.min_lr,
         args.epochs, len(data_loader),
         warmup_epochs=args.warmup_epochs,
@@ -321,7 +326,7 @@ def train_dino(args):
         data_loader.sampler.set_epoch(epoch)
 
         # ============ training one epoch of DINO ... ============
-        train_stats = train_one_epoch(logger, segdino,
+        train_stats = train_one_epoch(logger, segdino,focalloss,
                                       data_loader, optimizer, lr_schedule, wd_schedule, momentum_schedule,
                                       epoch, fp16_scaler, celoss, msn, proto_labels, prototypes, output_dim, args)
 
@@ -339,8 +344,8 @@ def train_dino(args):
             save_dict['fp16_scaler'] = fp16_scaler.state_dict()
 
         utils.save_on_master(save_dict, os.path.join(args.output_dir, 'checkpoint.pth'))
-        if args.saveckp_freq and (epoch+1) % args.saveckp_freq == 0 or (epoch+1) == args.epochs:
-            utils.save_on_master(save_dict, os.path.join(args.output_dir, f'checkpoint{epoch+1:04}.pth'))
+        # if args.saveckp_freq and (epoch+1) % args.saveckp_freq == 0 or (epoch+1) == args.epochs:
+        #     utils.save_on_master(save_dict, os.path.join(args.output_dir, f'checkpoint{epoch+1:04}.pth'))
         log_stats = {'epoch': epoch, **{f'train_{k}': v for k, v in train_stats.items()},
                      }
         if utils.is_main_process():
@@ -352,19 +357,40 @@ def train_dino(args):
     logger.info('Training time {}'.format(total_time_str))
 
 
-def train_one_epoch(logger, segdino, data_loader,
+def train_one_epoch(logger, segdino, focalloss, data_loader,
                     optimizer, lr_schedule, wd_schedule, momentum_schedule, epoch,
                     fp16_scaler, celoss, msn, proto_labels, prototypes, output_dim, args):
 
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Epoch: [{}/{}]'.format(epoch+1, args.epochs)
     for it, (target, anchors, mask_labels, img_mate) in enumerate(metric_logger.log_every(data_loader, 10, header, logger)):
+
+        is_first_it_of_epoch = it
         # update weight decay and learning rate according to their schedule
         it = len(data_loader) * epoch + it  # global training iteration
         for i, param_group in enumerate(optimizer.param_groups):
             param_group["lr"] = lr_schedule[it]
             if i == 0:  # only the first group is regularized
                 param_group["weight_decay"] = wd_schedule[it]
+
+        # visualiation
+        os.makedirs(os.path.join(args.output_dir,"visual"), exist_ok=True)
+        if is_first_it_of_epoch == 0:
+            for m in range(len(mask_labels)):
+                mask = mask_labels[m]
+                # print(mask.size())
+                save_mask = mask.numpy()*255
+                # print(np.unique(save_mask))
+                # print(target.size())
+                for b in range(mask.size()[0]):
+                    save_name = os.path.basename(img_mate['image_path'][b])[:-4]
+                    mask_save_path = os.path.join(args.output_dir, "visual", "eopch_{}_{}_1GT.png".format(epoch, save_name))
+                    cv2.imwrite(mask_save_path,save_mask[b])
+                    cv2.imwrite(os.path.join(args.output_dir, "visual", "eopch_{}_{}_0target.png".format(epoch, save_name)), target[b].transpose(2,0).numpy()*255)
+                    cv2.imwrite(os.path.join(args.output_dir, "visual", "eopch_{}_{}_2anchor.png".format(epoch, save_name)), anchors[m][b].transpose(2,0).numpy()*255)
+                    if b > 4:
+                        break
+                # exit()
 
         # move images to gpu
         anchors = [im.cuda(non_blocking=True) for im in anchors]
@@ -373,18 +399,33 @@ def train_one_epoch(logger, segdino, data_loader,
         ploss_meter = AverageMeter()
         rloss_meter = AverageMeter()
         eloss_meter = AverageMeter()
+        floss_meter = AverageMeter()
+        btwinloss_meter = AverageMeter()
         BCEloss_meter = AverageMeter()
 
         # teacher and student forward passes + compute dino loss
         with torch.cuda.amp.autocast(fp16_scaler is not None):
             pre_mask_list, student_output_2mlp_list, teacher_output_2mlp = segdino(target, anchors)
-            for pre_id in range(len(pre_mask_list)):
+            # print('pre_mask_list:',pre_mask_list)
+            for pre_id in range(len(pre_mask_list)): # number of multi-crop
                 BCEloss = celoss(pre_mask_list[pre_id], mask_labels[pre_id].float())
                 BCEloss_meter.update(BCEloss)
+                floss = focalloss(pre_mask_list[pre_id], mask_labels[pre_id].float())
+                floss_meter.update(floss)
 
+                # visualiation
+                if is_first_it_of_epoch == 0:
+                    for b in range(pre_mask_list[pre_id].size()[0]): # number of batch
+                        save_mask_pred = pre_mask_list[pre_id][b].reshape(224, 224).cpu().detach().numpy()*255
+                        save_name = os.path.basename(img_mate['image_path'][b])[:-4]
+                        mask_save_path = os.path.join(args.output_dir, "visual", "eopch_{}_{}_3predict.png".format(epoch, save_name))
+                        cv2.imwrite(mask_save_path, save_mask_pred)
+                        if b > 4:
+                            break
+            # exit()
             # Step 3. compute patch-based feature loss with me-max regularization. the features without via two mlp
-            # teacher_output = teacher_output_2mlp.float().detach() # 32,198,384
-            teacher_output = teacher_output_2mlp.float()# 32,198,384
+            teacher_output = teacher_output_2mlp.detach().float() # 32,198,384 Stop-Grad
+            # teacher_output = teacher_output_2mlp.float()# 32,198,384
             teacher_output_resized_list = []
             for j in range(len(pre_mask_list)): # number of crops
                 teacher_output_resized = []
@@ -418,8 +459,30 @@ def train_one_epoch(logger, segdino, data_loader,
                 rloss_meter.update(res_me_max)
                 eloss_meter.update(res_ent)
 
-            loss = BCEloss_meter.avg + args.ploss_weight*ploss_meter.avg + args.memax_weight * rloss_meter.avg + args.ent_weight * eloss_meter.avg
+                ### barlowtwins loss
+                # empirical cross-correlation matrix
+                c = student_output_2mlp_list[stu_out_id]
+                # print(c.size())#[4, 36, 384]
+                # print(teacher_output_resized_list[stu_out_id].transpose(1,2).size())#[4, 384, 36]
+                c = c @ teacher_output_resized_list[stu_out_id].transpose(1,2)
+                c =  torch.sum(c, dim=0)
+                # print(c.size())#[36, 36]
+                # sum the cross-correlation matrix between all gpus
+                c.div_(args.batch_size_per_gpu)
+                # print(c.size())#[36, 36]
+                torch.distributed.all_reduce(c)
+                on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
+                off_diag = off_diagonal(c).pow_(2).sum()
 
+                # print(on_diag.item(), off_diag.item())
+                btwin_loss = on_diag + 0.0051 * off_diag
+                btwinloss_meter.update(btwin_loss)
+
+            # loss = BCEloss_meter.avg + btwinloss_meter.avg + args.ploss_weight*ploss_meter.avg + args.memax_weight * rloss_meter.avg + args.ent_weight * eloss_meter.avg
+            loss = 1*floss_meter.avg + 1*BCEloss_meter.avg + 0.1*btwinloss_meter.avg + \
+                   args.ploss_weight*ploss_meter.avg + args.memax_weight * rloss_meter.avg + args.ent_weight * eloss_meter.avg
+
+        # print(BCEloss_meter.avg , btwinloss_meter.avg , args.ploss_weight*ploss_meter.avg ,args.memax_weight * rloss_meter.avg , args.ent_weight * eloss_meter.avg)
         if not math.isfinite(loss.item()):
             logger.error("Loss is {}, stopping training".format(loss.item()))
             sys.exit(1)
@@ -472,9 +535,9 @@ def train_one_epoch(logger, segdino, data_loader,
         # logging
         torch.cuda.synchronize()
         metric_logger.update(loss=loss.item())
-        metric_logger.update(lr=optimizer.param_groups[0]["lr"])
-        metric_logger.update(BCEloss=BCEloss_meter.avg, ploss=ploss_meter.avg, res_me_max=rloss_meter.avg,
+        metric_logger.update(floss=floss_meter.avg, BCEloss=BCEloss_meter.avg, btloss=btwinloss_meter.avg, ploss=ploss_meter.avg, res_me_max=rloss_meter.avg,
                              res_ent=eloss_meter.avg)
+        metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(wd=optimizer.param_groups[0]["weight_decay"])
 
     # gather the stats from all processes
@@ -503,6 +566,11 @@ class AverageMeter(object):
         self.sum += val * n
         self.count += n
         self.avg = self.sum / self.count
+def off_diagonal(x):
+        # return a flattened view of the off-diagonal elements of a square matrix
+        n, m = x.shape
+        assert n == m
+        return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('SegDINO', parents=[get_args_parser()])
