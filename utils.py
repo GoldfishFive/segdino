@@ -31,7 +31,7 @@ import torch
 from torch import nn
 import torch.distributed as dist
 from PIL import ImageFilter, ImageOps
-
+from torch.optim import lr_scheduler
 
 class GaussianBlur(object):
     """
@@ -202,13 +202,38 @@ def cosine_scheduler(base_value, final_value, epochs, niter_per_ep, warmup_epoch
     assert len(schedule) == epochs * niter_per_ep
     return schedule
 
+def step_scheduler(base_value, final_value, epochs, niter_per_ep, warmup_epochs=0, start_warmup_value=0):
+    warmup_schedule = np.array([])
+    warmup_iters = warmup_epochs * niter_per_ep
+    if warmup_epochs > 0:
+        warmup_schedule = np.linspace(start_warmup_value, base_value, warmup_iters)
+
+    step = 35
+    gammer = 10
+    leftepochs = epochs - warmup_epochs
+    first_lr = np.ones(step * niter_per_ep)*base_value
+    schedule = np.concatenate((warmup_schedule, first_lr))
+    acturl_lr = base_value
+    print(leftepochs//step,leftepochs%step)
+    for i in range(leftepochs//step - 1):
+        acturl_lr = acturl_lr/gammer
+        add_lr = np.ones(step * niter_per_ep) * acturl_lr
+        schedule = np.concatenate((schedule, add_lr))
+
+    add_lr = np.ones((leftepochs%step) * niter_per_ep) * acturl_lr
+    schedule = np.concatenate((schedule, add_lr))
+
+    print(len(schedule), epochs * niter_per_ep)
+    assert len(schedule) == epochs * niter_per_ep
+    return schedule
+
 
 def bool_flag(s):
     """
     Parse boolean arguments from the command line.
     """
-    FALSY_STRINGS = {"off", "false", "0"}
-    TRUTHY_STRINGS = {"on", "true", "1"}
+    FALSY_STRINGS = {"off", "false", "0", "False"}
+    TRUTHY_STRINGS = {"on", "true", "1", "True"}
     if s.lower() in FALSY_STRINGS:
         return False
     elif s.lower() in TRUTHY_STRINGS:

@@ -109,25 +109,12 @@ class ConvHead(nn.Module):
             nn.BatchNorm2d(int(dim_reduced/8)),nn.GELU(),
         )
         self.mask_fcn_logits = nn.Conv2d(int(dim_reduced/8), num_classes, 1, 1, 0)
-        self.sigmoid = nn.Sigmoid()
+        # self.sigmoid = nn.Sigmoid()
+
     def forward(self, x):
-        # torch.Size([256, 128, 7, 7])
-        # torch.Size([256, 64, 14, 14])
-        # torch.Size([256, 64, 28, 28])
-        # torch.Size([256, 64, 56, 56])
-        # x = self.conv5_mask(x)
-        # x = F.relu(x)
-        # x = self.conv5_mask2(x)
-        # x = F.relu(x)
-        # x = self.conv5_mask3(x)
-        # x = F.relu(x)
-        # x = self.conv5_mask4(x)
-        # x = F.relu(x)
-        # x = self.conv5_mask5(x)
-        # x = F.relu(x)
         x = self.conv_block(x)
         x = self.mask_fcn_logits(x)
-        x = self.sigmoid(x)
+        # x = self.sigmoid(x)
         return x
 
 class Neck(nn.Module):
@@ -139,10 +126,14 @@ class Neck(nn.Module):
         self.pos_embed_t = nn.Parameter(torch.zeros(1, 196, input_dim))
         self.pos_embed_x = nn.Parameter(torch.zeros(1, 36, input_dim))
 
-
         # for patch-based feature loss
-        self.mlp_x = Mlp(in_features=self.input_dim, hidden_features=self.decoder_emd_dim, act_layer=nn.GELU, drop=0.1)
-        # self.mlp_t = Mlp(in_features=self.input_dim, hidden_features=self.decoder_emd_dim, act_layer=nn.GELU, drop=0.)
+        self.mlp_x = Mlp(in_features=self.input_dim, hidden_features=self.decoder_emd_dim, out_features=512, act_layer=nn.GELU, drop=0.1)
+        self.mlp_t = Mlp(in_features=self.input_dim, hidden_features=self.decoder_emd_dim, out_features=512, act_layer=nn.GELU, drop=0.)
+        self.bn_x = nn.BatchNorm1d(36)
+        self.bn_t = nn.BatchNorm1d(196)
+        self.pre_x_relu = act_layer()
+        self.pre_t_relu = act_layer()
+
 
         self.x_fc = nn.Linear(self.input_dim, self.decoder_emd_dim, bias=False)
         self.t_fc = nn.Linear(self.input_dim, self.decoder_emd_dim, bias=False)
@@ -155,12 +146,9 @@ class Neck(nn.Module):
 
         # self.cross_attention = CrossAttention(dim=self.decoder_emd_dim, out_dim=self.decoder_emd_dim,
         #                                       num_heads=8, qkv_bias=False, qk_scale=None)# B x L*(1-mask_ratio) x 256
-
         # self.cross_attention = CrossAttention_cropy(dim=self.decoder_emd_dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.)
-        self.cross_attention = nn.MultiheadAttention(embed_dim = self.decoder_emd_dim, num_heads = 8, dropout = 0.1, batch_first=True)
-        # B x L*(1-mask_ratio) x 256
+        self.cross_attention = nn.MultiheadAttention(embed_dim = self.decoder_emd_dim, num_heads = 8, dropout = 0.1, batch_first=True)# B x L*(1-mask_ratio) x 256
         # self.norm_cross = nn.LayerNorm(self.cross_atte_out_dim)
-        # self.norm_cross = nn.BatchNorm1d(49) #[B, 49, 128]
         self.norm_cross = nn.BatchNorm1d(196) #[4, 196, 256]
         self.relu_cross = act_layer()
 
@@ -168,43 +156,34 @@ class Neck(nn.Module):
         self.convhead = ConvHead(num_inputs=self.decoder_emd_dim, dim_reduced=64, num_classes=1)
         self.upSampling_conv =  nn.Upsample(size=(224, 224), mode='bilinear') # predict a Bx64x64 result
 
-        # ## change for full conv head
+        ## fc head
         self.fc_head = nn.Linear(self.decoder_emd_dim,1, bias=False) # # B x L*(1-mask_ratio) X 1
-        # self.upSampling =  nn.Upsample(scale_factor=(4), mode='nearest')#
         self.upSampling =  nn.Upsample(size=(64, 64), mode='nearest') # predict a Bx64x64 resul
 
         self._initialize_weights()
 
+
     def forward(self, t, x):
-        # t_ = self.mlp_t(t) # B, 196, 512/B, 36, 512
-        t_ = t # teacher feature don't via projector
+        # t_ = self.mlp_t(t) # [B, 196, 512] or[B, 36, 512]
+        # t_ = t # teacher feature don't via a projector
+        t_ = self.pre_t_relu(self.bn_t(self.mlp_t(t))) # teacher feature via a projector
 
         t = t + self.interpolate_pos_encoding(t, 14, 14, self.pos_embed_t)
-        t = self.t_fc(t)
-        t = self.norm_t(t)
-        t = self.t_relu(t)
+        t = self.t_relu(self.norm_t(self.t_fc(t)))
         # t, mask, ids_restore = self.random_masking(t, self.mask_ratio)
 
         _x_list = [] # for feature msn loss
         x_list = [] # for BCEloss
         for idx in range(len(x)):
-            # print('idx',idx)
             # _x_list.append(self.mlp_x(x[idx]))# B, 1024, 512/B, 196, 512
-            # y = self.x_fc(x[idx])
             x_add_pos =x[idx] + self.interpolate_pos_encoding(x[idx], 6, 6, self.pos_embed_x)
-            _x_list.append(self.mlp_x(x_add_pos))# B, 1024, 512/B, 196, 512
+            _x_list.append(self.bn_x(self.mlp_x(x_add_pos))) # B, 36, 512
             y = self.x_fc(x_add_pos)
             y = self.norm_x(y)
             y = self.x_relu(y)
 
-            # s = torch.cat([y,t],dim=1)
-            # # print("y_shape:", y.size()) #[4, 36, 256]
-            # # print("t_shape:", t.size()) #[4, 196, 256]
-            # # print("s.size():", s.size()) #[4, 232, 256]
             # y = self.cross_attention(s)
-
             y, attn_output_weights = self.cross_attention(t, y, y)
-
             # y = self.cross_attention(y, t)
             # print("y_shape:", y.size()) #[256, 49, 128]
             y = self.norm_cross(y)
@@ -216,13 +195,14 @@ class Neck(nn.Module):
             y = y.transpose(1,2).reshape(B,C,int(feature_h),int(feature_w))
             y = self.convhead(y)
             y = self.upSampling_conv(y)
+            y = y.squeeze(1)
 
             # # x= self.upSampling(x.reshape(B, 1, 17, 12)) # [B, 204, 1]=>B,1,17,12=>B,1,64,64 掩模的比例不同，剩下的特征数不一样，需要reshape后才能上采样输出特征图
             # # y= self.upSampling(y.reshape(B, 1, 7, 7)) # [B, 204, 1]=>B,1,7,7=>B,1,64,64 掩模的比例不同，剩下的特征数不一样，需要reshape后才能上采样输出特征图
             # y= self.upSampling(y.reshape(B, 1, int(feature_h), int(feature_w))) # [B, 204, 1]=>B,1,7,7=>B,1,64,64 掩模的比例不同，剩下的特征数不一样，需要reshape后才能上采样输出特征图
             # # x = nn.functional.interpolate(x.reshape(B, 1, 17, 12), size=[64, 64], mode="nearest")
             # # print("y.size():",y.size())
-            y = y.reshape(B, -1)
+            # y = y.reshape(B, -1)
             # # print("y.size():",y.size())
             x_list.append(y)
 
@@ -276,13 +256,19 @@ class Neck(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
             elif isinstance(m, nn.BatchNorm1d):
-                nn.init.ones_(m.weight)
-                nn.init.zeros_(m.bias)
+                if m.weight is not None:
+                    nn.init.ones_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
             elif isinstance(m, nn.BatchNorm2d):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
             elif isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, 0, 0.01)
+                # nn.init.xavier_normal_(m.weight)#这并不适用于ReLU激活函数。另一个是激活值关于0对称，
+                # 这个不适用于sigmoid函数和ReLU函数。
+                # nn.init.constant_(m.bias, 0)
+                # nn.init.normal_(m.weight, 0, 0.02)
+                nn.init.normal_(m.weight, 0, 1)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 

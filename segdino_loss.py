@@ -21,6 +21,7 @@ class AllReduce(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grads):
         return grads
+
 class AllReduceSum(torch.autograd.Function):
 
     @staticmethod
@@ -38,8 +39,8 @@ class AllReduceSum(torch.autograd.Function):
     def backward(ctx, grads):
         return grads
 
-class FocalLoss():
-    def __init__(self, alpha=.25, gamma=2, reduction: str = "none",):
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=.25, gamma=2, reduction: str = "mean"):
         super(FocalLoss, self).__init__()
         self.alpha = alpha
         self.gamma = gamma
@@ -50,11 +51,12 @@ class FocalLoss():
         targets = targets.float()
         # p = torch.sigmoid(inputs)
         p = inputs
+        # ce_loss = F.binary_cross_entropy(inputs, targets, reduction="none")
         ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
         p_t = p * targets + (1 - p) * (1 - targets)
         loss = ce_loss * ((1 - p_t) ** self.gamma)
 
-        if self.alpha >= 0:
+        if self.alpha >= 0: # alpha is for target==1
             alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
             loss = alpha_t * loss
         if self.reduction == "mean":
@@ -74,8 +76,8 @@ class WeightedFocalLoss(nn.Module):
     def forward(self, inputs, targets):
         # print('inputs.size()', inputs.size())
         # print("targets.size()", targets.size())
-        # BCE_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
-        BCE_loss = F.binary_cross_entropy(inputs, targets, reduction='none') # 模型中有sigmoid了
+        BCE_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        # BCE_loss = F.binary_cross_entropy(inputs, targets, reduction='none') # 模型中有sigmoid了
         # print(BCE_loss.size())
         targets = targets.type(torch.long)
         # print(self.alpha)
@@ -115,7 +117,7 @@ def init_msn_loss(num_views=1, tau=0.1, me_max=True, return_preds=False):
         softmax_tem = softmax(tem)
         re = softmax_tem @ support_labels
         # sumtem = softmax_tem.sum(dim=1)
-        sumtem = softmax_tem.sum(dim=2)
+        # sumtem = softmax_tem.sum(dim=2)
         return re
 
     def loss(anchor_views, target_views, prototypes, proto_labels, T=0.25,
@@ -123,8 +125,8 @@ def init_msn_loss(num_views=1, tau=0.1, me_max=True, return_preds=False):
 
         # Step 1: compute anchor predictions
         probs = snn(anchor_views, prototypes, proto_labels)
-        probssumdim1 = probs.sum(dim=1)
-        probssumdim2 = probs.sum(dim=2)
+        # probssumdim1 = probs.sum(dim=1)
+        # probssumdim2 = probs.sum(dim=2)
 
         # Step 2: compute targets for anchor predictions
         with torch.no_grad():
@@ -167,21 +169,23 @@ def init_msn_loss(num_views=1, tau=0.1, me_max=True, return_preds=False):
 
         # print(targets.size())
         # -- loggings
-        with torch.no_grad():
-            targets_argmax = targets.argmax(dim=1)
-            # num_ps = float(len(set(targets.argmax(dim=1).tolist())))
-            num_ps = None
-            max_t = targets.max(dim=1).values.mean()
-            min_t = targets.min(dim=1).values.mean()
-            log_dct = {'np': num_ps, 'max_t': max_t, 'min_t': min_t}
-
-            targets_max_mean = targets.max(dim=1).values
-            targets_min_mean = targets.min(dim=1).values
+        # with torch.no_grad():
+        #     targets_argmax = targets.argmax(dim=1)
+        #     # num_ps = float(len(set(targets.argmax(dim=1).tolist())))
+        #     num_ps = None
+        #     max_t = targets.max(dim=1).values.mean()
+        #     min_t = targets.min(dim=1).values.mean()
+        #     log_dct = {'np': num_ps, 'max_t': max_t, 'min_t': min_t}
+        #
+        #     targets_max_mean = targets.max(dim=1).values
+        #     targets_min_mean = targets.min(dim=1).values
 
         if return_preds:
-            return loss, rloss, sloss, log_dct, targets
+            # return loss, rloss, sloss, log_dct, targets
+            return loss, rloss, sloss, targets
 
-        return loss, rloss, sloss, log_dct
+        return loss, rloss, sloss
+        # return loss, rloss, sloss, log_dct
 
     return loss
 
